@@ -1,0 +1,58 @@
+# [BUG SUMMARY]
+TailwindCSS PostCSS plugin migration error causing build failure in Vite 8.0.7
+
+## [STACK TRACE / LOGS]
+```
+[plugin:vite:css] [postcss] It looks like you're trying to use `tailwindcss` directly as a PostCSS plugin. The PostCSS plugin has moved to a separate package, so to continue using Tailwind CSS with PostCSS you'll need to install `@tailwindcss/postcss` and update your PostCSS configuration.
+
+D:/Amour/trae project/ue-helper/src/App.css:undefined:null
+at at (D:\Amour\trae project\ue-helper\node_modules\tailwindcss\dist\lib.js:38:1643)
+at LazyResult.runOnRoot (D:\Amour\trae project\ue-helper\node_modules\postcss\lib\lazy-result.js:325:12)
+at LazyResult.runAsync (D:\Amour\trae project\ue-helper\node_modules\postcss\lib\lazy-result.js:277:12)
+at LazyResult.async (D:\Amour\trae project\ue-helper\node_modules\postcss\lib\lazy-result.js:189:23)
+at LazyResult.then (D:\Amour\trae project\ue-helper\node_modules\postcss\lib\lazy-result.js:210:17)
+at async runPostCSS (file:///D:/Amour/trae%20project/ue-helper/node_modules/vite/dist/node/chunks/dep-HYCS23T7.js:56492:18)
+at async compilePostCSS (file:///D:/Amour/trae%20project/ue-helper/node_modules/vite/dist/node/chunks/dep-HYCS23T7.js:56433:16)
+at async compileCSS (file:///D:/Amour/trae%20project/ue-helper/node_modules/vite/dist/node/chunks/dep-HYCS23T7.js:56186:27)
+at async TransformPluginContext.handler (file:///D:/Amour/trae%20project/ue-helper/node_modules/vite/dist/node/chunks/dep-HYCS23T7.js:55865:29)
+at async EnvironmentPluginContainer.transform (file:///D:/Amour/trae%20project/ue-helper/node_modules/vite/dist/node/chunks/dep-HYCS23T7.js:44821:16)
+```
+
+## [ENVIRONMENT & STATE CONTEXT]
+- **OS:** Windows
+- **Vite Version:** 8.0.7
+- **TailwindCSS Version:** 4.x (latest)
+- **Node Package Manager:** npm
+- **Project State:** Phase 1 frontend prototype implementation completed, running `npm run dev`
+
+## [CODE CONTEXT]
+**Current postcss.config.js:**
+```javascript
+export default {
+  plugins: {
+    tailwindcss: {},
+    autoprefixer: {},
+  },
+}
+```
+
+## [ROOT CAUSE HYPOTHESIS]
+TailwindCSS v4 has separated the PostCSS plugin into a dedicated `@tailwindcss/postcss` package, breaking backward compatibility with the traditional `tailwindcss` plugin import in PostCSS configuration. This is a breaking change introduced in TailwindCSS v4 release.
+
+## [PROPOSED SOLUTIONS]
+**Solution 1 (Recommended - Use TailwindCSS v3):**
+1. Uninstall current tailwindcss: `npm uninstall tailwindcss`
+2. Install LTS v3 version: `npm install tailwindcss@^3.4.0`
+3. No changes required to postcss.config.js
+
+**Solution 2 (Migrate to TailwindCSS v4):**
+1. Install new PostCSS plugin: `npm install @tailwindcss/postcss`
+2. Update postcss.config.js:
+```javascript
+export default {
+  plugins: {
+    '@tailwindcss/postcss': {},
+    autoprefixer: {},
+  },
+}
+```

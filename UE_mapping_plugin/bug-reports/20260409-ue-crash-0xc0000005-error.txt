@@ -1,0 +1,66 @@
+# UE 5.7 崩溃（0xC0000005 空指针访问）分析报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 错误码 | `0xC0000005: Access violation reading location 0x0000000000000188` |
+| 崩溃类型 | 空指针解引用，访问了nullptr对象偏移0x188字节处的成员 |
+| 前置修改 | 新增了AssetRegistry资产依赖扫描逻辑、WebBrowser UObject绑定逻辑 |
+
+---
+
+## 根因分析（按概率从高到低）
+### 1. 90%概率：资产依赖扫描逻辑空指针
+问题出在新增的AICartographerBridge.cpp依赖扫描代码：
+```cpp
+AssetRegistryModule.Get().GetDependencies(
+    FAssetIdentifier(SourceNodeId),
+    DependencyIdentifiers,
+    UE::AssetRegistry::EDependencyCategory::All
+);
+```
+- 返回的`DependencyIdentifiers`数组中存在无效的`AssetIdentifier`对象
+- 访问`TargetIdentifier.PackageName`时，`TargetIdentifier`本身为空或其`PackageName`成员为nullptr
+- 扫描到损坏/无效的蓝图资产，返回的`AssetData`对象无效，访问其成员时触发崩溃
+
+### 2. 8%概率：WebBrowser绑定逻辑空指针
+- `WebBrowserWidget`智能指针本身为空时调用了`BindUObject`方法
+- UE 5.7 预览版WebBrowser模块内部bug，绑定UObject时触发内部空指针崩溃
+- 页面未完全加载时执行绑定，触发CEF内核空指针
+
+### 3. 2%概率：UE引擎本身问题
+日志中的HTTP超时（访问google连通性检测）和Zen服务启动日志都是正常行为，和崩溃无直接关联，仅2%概率是UE 5.7预览版本身的稳定性问题。
+
+---
+
+## 排查步骤
+### 第一步：定位崩溃时机
+1. 打开UE后是**直接打开AICartographer Tab就崩溃** → 问题在WebBrowser绑定逻辑
+2. 打开Tab正常，**点击扫描按钮后才崩溃** → 问题在资产依赖扫描逻辑
+
+### 第二步：代码验证
+#### 依赖扫描问题排查：
+1. 注释掉完整的依赖扫描生成Edges的逻辑，仅保留Nodes生成，重新编译测试是否崩溃
+2. 在访问PackageName前添加有效性判断：
+```cpp
+for (const FAssetIdentifier& TargetIdentifier : DependencyIdentifiers)
+{
+    // 新增空值校验
+    if (!TargetIdentifier.IsValid() || !TargetIdentifier.PackageName.IsValid()) continue;
+    
+    FName TargetPackage = TargetIdentifier.PackageName;
+    // 原有逻辑
+}
+```
+3. 给AssetData也添加有效性判断：`if (!Asset.IsValid()) continue;`
+
+#### WebBrowser绑定问题排查：
+1. 注释掉OnLoadCompleted里的BindUObject逻辑，仅保留WebBrowser加载，测试是否崩溃
+2. 添加指针有效性校验：`if (WebBrowserWidget.IsValid() && RPCBridge.IsValid())`
+
+### 第三步：日志定位
+在扫描逻辑各关键节点添加UE_LOG，定位崩溃发生的具体代码行。
+
+---
+
+## 临时解决方案
+如果需要紧急使用插件，可以先注释掉依赖扫描生成Edges的完整逻辑，仅保留节点展示功能，待空指针问题修复后再恢复连线功能。

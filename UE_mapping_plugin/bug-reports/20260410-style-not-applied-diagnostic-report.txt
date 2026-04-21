@@ -1,0 +1,79 @@
+# BUG SUMMARY
+Phase 6.1.3 visual styles not rendering correctly on frontend: nodes remain sharp-cornered, buttons lack rounded design, sidebar containers show flat styling instead of rounded groove design
+
+## SCREENSHOT EVIDENCE
+1. Left canvas nodes: sharp rectangular edges (no rounded-3xl effect visible)
+2. Sidebar buttons: flat rectangular design, no rounded-2xl or mechanical press effect
+3. Sidebar content containers (Package Path, Incoming/Outgoing sections): flat dark gray, no rounded groove styling
+
+## ENVIRONMENT & STATE CONTEXT
+- Project: UE_mapping_plugin Phase 6.1.3 Dark TE Industrial Aesthetic
+- Last deployed changes: All visual refactors completed per specification
+- Expected: Node rounded-3xl, buttons rounded-2xl, containers rounded-2xl/3xl
+- Actual: All rounded classes missing from rendered DOM
+
+## CODE CONTEXT
+### 1. SystemNode.tsx (Code vs Render):
+```typescript
+// Written code has rounded-3xl:
+<div className={`relative px-4 py-4 min-w-[220px] bg-[#1a1a1a] rounded-3xl border-2 transition-all duration-200 
+    ${selected ? 'border-[#ff6600] shadow-[0_0_20px_rgba(255,102,0,0.4)] z-50 scale-105' : 'border-[#333333] hover:border-[#555555]'}`}>
+```
+**Rendered DOM:** Node shows sharp border-radius, indicating `rounded-3xl` class not being applied
+
+### 2. Sidebar.tsx Buttons (Code vs Render):
+```typescript
+// Written code has rounded-2xl:
+className="w-full bg-gradient-to-b from-[#ff7711] to-[#e65c00] text-[#0a0a0a] font-black uppercase tracking-widest py-3.5 px-4 rounded-2xl transition-all duration-75 shadow-[0_6px_0_0_#b34700,0_8px_15px_rgba(0,0,0,0.5)] hover:shadow-[0_4px_0_0_#b34700,0_5px_10px_rgba(0,0,0,0.5)] hover:translate-y-[2px] active:shadow-[0_0_0_0_#b34700] active:translate-y-[6px] border border-[#ff9955]/40 flex items-center justify-center gap-2 mt-2"
+```
+**Rendered DOM:** Buttons are flat rectangles, no rounded corners or gradient effect
+
+### 3. Sidebar Container Classes (Code vs Render):
+```typescript
+// Written code has rounded-3xl for main card and rounded-2xl for inner panels:
+<div className="mb-6 bg-[#151515] p-5 rounded-3xl border border-[#2a2a2a] shadow-lg flex flex-col gap-4">
+    {/* ... */}
+    <div className="bg-[#0a0a0a] p-3 rounded-2xl border border-[#1f1f1f]">
+```
+**Rendered DOM:** Containers are flat with zero rounding, no groove effect
+
+## ROOT CAUSE HYPOTHESIS
+**Tier 1 (Most Likely):** Tailwind CSS class purge / tree-shaking issue
+- The `rounded-3xl` and newer Tailwind classes are not included in the production build CSS bundle
+- Build process is removing unused classes despite them being present in JSX
+
+**Tier 2 (Possible):** Caching / build pipeline failure
+- Development server hot reload not working properly, serving stale cached version of CSS
+- PostCSS/Tailwind configuration error preventing new classes from being processed
+
+**Tier 3 (Edge Case):** CSS specificity conflict
+- Global CSS override is forcing border-radius: 0 on all elements, overriding Tailwind classes
+
+## PROPOSED SOLUTIONS
+### Solution 1 (Immediate Fix): Force rebuild and clear cache
+```bash
+# Stop dev server
+rm -rf node_modules/.vite
+rm -rf dist
+npm run dev
+```
+
+### Solution 2 (Tailwind Config Update):
+Add rounded classes to safelist in `tailwind.config.js` to prevent purging:
+```javascript
+safelist: [
+  'rounded-2xl',
+  'rounded-3xl',
+  'rounded-xl',
+  // Add other rounded classes being used
+]
+```
+
+### Solution 3 (Inline Style Fallback):
+Replace Tailwind rounded classes with inline style attributes for critical elements:
+```typescript
+// For nodes:
+style={{ borderRadius: '24px' }} // Equivalent to rounded-3xl
+```
+
+All solutions maintain existing design specifications while resolving the rendering mismatch.

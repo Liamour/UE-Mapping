@@ -1,0 +1,135 @@
+BUG REPORT: UE WebUI Bridge Parameter Mismatch Crash
+Date: 2026-04-12
+Affected Component: C++ ↔ JS RPC Bridge
+Severity: Critical (causes Unreal Editor instant crash)
+==============================================================================
+CRASH LOG ANALYSIS
+==============================================================================
+The MONZA::DdiThreadingContext exceptions are Intel GPU driver internal errors triggered by UE WebBrowser render thread crash. Root cause is our JS bridge call passing invalid parameter count to UE C++ UFUNCTION, leading to memory corruption in the WebUI V8 binding layer, which propagates to the GPU render thread.
+
+Thread exit code 0 is secondary effect of the render thread crash terminating child worker threads.
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+Issue 1: Outgoing Call Parameter Mismatch (Crash Trigger)
+------------------------------------------------------------------------------
+C++ UFUNCTION Definition (only accepts 1 parameter):
+```cpp
+UFUNCTION(BlueprintCallable, Category = "AICartographer|DeepScan")
+void RequestDeepScan(const FString& AssetPath);
+```
+
+JS Bridge Call (passes 2 parameters, wrong):
+```typescript
+window.ue.aicartographerbridge.requestDeepScan(nodeId, assetPath);
+```
+
+The UE WebBrowser V8 binding layer cannot handle extra parameters passed to UFUNCTIONs, causing buffer overflow and memory corruption that crashes the render thread.
+
+Issue 2: Callback Parameter Mismatch (State Update Failure)
+------------------------------------------------------------------------------
+C++ callback execution (only passes 1 AST parameter):
+```cpp
+WebBrowser->ExecuteJavascript(FString::Printf(TEXT("window.receiveDeepScan(%s)"), *OutputJson));
+```
+
+JS callback implementation (expects 2 parameters, wrong):
+```typescript
+(window as any).receiveDeepScan = async (nodeId: string, astData: any) => {}
+```
+
+This causes `nodeId` to always be `undefined` in the callback, leading to `updateNodeMeta` being called with invalid node ID, no state changes ever apply even if crash is fixed.
+==============================================================================
+BUG FIX SOLUTIONS
+==============================================================================
+Solution A: Frontend-only Compatibility Fix (No C++ changes required)
+------------------------------------------------------------------------------
+Suitable for quick hotfix, supports only 1 concurrent scan at a time:
+1. Add global pending scan ID storage in engineBridge.ts:
+   ```typescript
+   let pendingScanNodeId: string | null = null;
+   ```
+2. Modify requestDeepScan:
+   ```typescript
+   export const requestDeepScan = (nodeId: string, assetPath: string) => {
+     // Prevent concurrent scans
+     if (pendingScanNodeId) return;
+     
+     useGraphStore.getState().updateNodeMeta(nodeId, { scanStatus: 'scanning' });
+     pendingScanNodeId = nodeId; // Store node ID locally
+     
+     try {
+       if (window.ue && window.ue.aicartographerbridge) {
+         // ONLY PASS 1 PARAMETER TO MATCH C++ SIGNATURE
+         window.ue.aicartographerbridge.requestDeepScan(assetPath); 
+       } else {
+         setTimeout(() => {
+           if ((window as any).receiveDeepScan) {
+             (window as any).receiveDeepScan({ mock: "ast_data", status: "success" });
+           }
+         }, 1500);
+       }
+     } catch (e) {
+       useGraphStore.getState().updateNodeMeta(nodeId, { scanStatus: 'failed', scanError: String(e) });
+       pendingScanNodeId = null;
+     }
+   };
+   ```
+3. Modify receiveDeepScan callback:
+   ```typescript
+   (window as any).receiveDeepScan = async (astData: any) => {
+     // Use locally stored node ID
+     const nodeId = pendingScanNodeId;
+     pendingScanNodeId = null;
+     
+     if (!nodeId) return;
+     
+     console.log("DEEP SCAN AST RECEIVED:", { nodeId, astData });
+     
+     // Rest of logic remains unchanged
+     if (astData.status === "error") {
+       useGraphStore.getState().updateNodeMeta(nodeId, { scanStatus: 'failed', scanError: "Engine AST Extractor Failed" });
+       return;
+     }
+   
+     try {
+       const aiResult = await analyzeBlueprintAST(astData);
+       useGraphStore.getState().updateNodeMeta(nodeId, {
+         scanStatus: 'completed',
+         analysisResult: aiResult.description,
+         tags: aiResult.tags
+       });
+     } catch (error) {
+       useGraphStore.getState().updateNodeMeta(nodeId, { scanStatus: 'failed', scanError: "LLM Analysis Timeout" });
+     }
+   };
+   ```
+
+Solution B: Full Dual-end Fix (Supports Concurrent Scans)
+------------------------------------------------------------------------------
+Suitable for long term implementation, supports multiple parallel scans:
+1. Modify C++ UFUNCTION to accept 2 parameters:
+   ```cpp
+   UFUNCTION(BlueprintCallable, Category = "AICartographer|DeepScan")
+   void RequestDeepScan(const FString& NodeId, const FString& AssetPath);
+   ```
+2. Modify C++ callback execution to pass NodeId:
+   ```cpp
+   FString OutputJson;
+   // Serialize AST to JSON...
+   WebBrowser->ExecuteJavascript(FString::Printf(TEXT("window.receiveDeepScan(\"%s\", %s)"), *NodeId, *OutputJson));
+   ```
+3. JS side remains unchanged as current implementation already accepts 2 parameters.
+==============================================================================
+TEMPORARY WORKAROUND
+==============================================================================
+Development environment testing will not trigger crash: the mock fallback path does not call the UE bridge interface, only executes local setTimeout logic. You can test all UI functionality locally before applying the fix.
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. Clicking "Initialize Deep Scan" in UE editor no longer causes crash
+2. Console prints "DEEP SCAN AST RECEIVED" log with valid nodeId
+3. Scan status updates correctly in sidebar: [PROCESSING AST ...] → [DECOMPILATION COMPLETE]
+4. Analysis result and tags appear correctly in sidebar
+5. Node card asset path remains unchanged throughout the entire process
+6. Multiple sequential scans work correctly with no state leaks

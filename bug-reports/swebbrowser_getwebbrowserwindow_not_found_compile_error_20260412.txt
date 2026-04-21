@@ -1,0 +1,112 @@
+BUG REPORT: 'GetWebBrowserWindow' is not a member of 'SWebBrowser' Compile Error
+Date: 2026-04-12
+Affected Component: AICartographer Module Bridge Initialization
+Severity: Critical (blocks UE compilation)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+Build exit code 6 with error:
+```
+'GetWebBrowserWindow': is not a member of 'SWebBrowser'
+```
+
+Location: `AICartographer.cpp` line: `RPCBridge->InitBrowserWindow(WebBrowserWidget->GetWebBrowserWindow());`
+==============================================================================
+ROOT CAUSE
+==============================================================================
+UE 5.7 SWebBrowser API Breaking Change / API Misuse:
+The `SWebBrowser` Slate widget class **does NOT have a public `GetWebBrowserWindow()` method** in UE 5.7. This is either:
+1. An intentional API change in UE 5.7 where this internal method was removed from public visibility
+2. A historical API misuse: We were calling an internal private/protected method that was never part of the public SWebBrowser interface
+3. The method was renamed to `GetBrowser()` in newer UE versions
+==============================================================================
+CRITICAL DISCOVERY: UNNECESSARY COMPLEXITY
+==============================================================================
+We completely overengineered the implementation! The `SWebBrowser` class already has a **public native `ExecuteJavascript()` method** directly exposed on the widget instance. We do NOT need to extract the internal `IWebBrowserWindow` pointer at all to execute JS code. This eliminates the entire need for:
+- The `WeakBrowserWindow` member variable in Bridge
+- The `InitBrowserWindow` initialization method
+- Any dependency on private/internal WebBrowser APIs
+==============================================================================
+BUG FIX SOLUTIONS (No code modifications applied per requirements)
+==============================================================================
+OPTION A: BEST PRACTICE DELEGATE PATTERN (RECOMMENDED, ZERO WEB BROWSER DEPENDENCY)
+------------------------------------------------------------------------------
+Perfectly decouples Bridge from WebBrowser implementation, 100% forward compatible with all UE versions, zero API dependency:
+1. Modify `AICartographerBridge.h`:
+   ```cpp
+   // Add delegate declaration at top of file
+   DECLARE_DELEGATE_TwoParams(FOnDeepScanResult, const FString& /*NodeId*/, const FString& /*ASTJson*/);
+
+   UCLASS()
+   class AICARTOGRAPHER_API UAICartographerBridge : public UObject
+   {
+       GENERATED_BODY()
+   public:
+       // ... existing UFUNCTIONs ...
+       // Add public delegate member for result callback
+       FOnDeepScanResult OnDeepScanResult;
+       
+       // REMOVE ENTIRELY: void InitBrowserWindow(...) method
+   private:
+       // REMOVE ENTIRELY: TWeakPtr<IWebBrowserWindow> WeakBrowserWindow; member
+   };
+   ```
+
+2. Modify `AICartographerBridge.cpp` `RequestDeepScan` method:
+   ```cpp
+   // Replace all WebBrowser related code with:
+   if (OnDeepScanResult.IsBound())
+   {
+       OnDeepScanResult.Execute(NodeId, OutputJson);
+   }
+   else
+   {
+       UE_LOG(LogTemp, Error, TEXT("DeepScan Error: No result callback bound!"));
+   }
+   // REMOVE ENTIRELY: InitBrowserWindow method implementation
+   ```
+
+3. Modify `AICartographer.cpp` binding logic:
+   ```cpp
+   if (WebBrowserWidget.IsValid() && RPCBridge.IsValid())
+   {
+       // Bind delegate directly to WebBrowser's ExecuteJavascript method
+       RPCBridge->OnDeepScanResult.BindLambda([WebBrowserWidget](const FString& NodeId, const FString& ASTJson)
+       {
+           FString JSCommand = FString::Printf(TEXT("window.receiveDeepScan(\"%s\", %s)"), *NodeId, *ASTJson);
+           WebBrowserWidget->ExecuteJavascript(JSCommand); // Use native public API!
+       });
+       
+       WebBrowserWidget->BindUObject(TEXT("cartographerbridge"), RPCBridge.Get(), true);
+       UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] RPC Bridge Bound to JS Context Successfully."));
+   }
+   ```
+
+This solution is the most robust and maintainable:
+✅ Eliminates all dependency on WebBrowser internal APIs
+✅ 100% forward compatible with all UE versions
+✅ Perfect separation of concerns: Bridge only handles business logic, module handles UI/JS execution
+✅ No memory leak risks, no weak pointer management needed
+
+OPTION B: SIMPLE API FIX (QUICK HOTFIX)
+------------------------------------------------------------------------------
+If you want to retain the existing architecture, replace the invalid API call with the correct one:
+```cpp
+// Replace:
+RPCBridge->InitBrowserWindow(WebBrowserWidget->GetWebBrowserWindow());
+
+// With UE 5.7 correct API:
+RPCBridge->InitBrowserWindow(WebBrowserWidget->GetBrowser());
+```
+Or even simpler, pass the WebBrowser widget directly and call `ExecuteJavascript` on it instead of the window pointer.
+==============================================================================
+TEMPORARY WORKAROUND
+==============================================================================
+Comment out the InitBrowserWindow line entirely. All frontend functionality will continue to work via the mock fallback path for UI testing, while we fix the C++ implementation.
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. UE compiles with 0 errors
+2. Clicking "Initialize Deep Scan" does not crash
+3. Console logs "DEEP SCAN AST RECEIVED:" with valid data
+4. Sidebar scan status and analysis result update correctly

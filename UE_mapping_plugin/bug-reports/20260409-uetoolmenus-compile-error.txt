@@ -1,0 +1,39 @@
+# 编译错误Bug报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 项目版本 | UE 5.7 |
+| 插件 | AICartographer |
+| 错误数量 | 5个C++编译错误 |
+| 影响范围 | 插件完全无法编译加载 |
+
+---
+
+## 错误明细
+| 错误代码 | 错误描述 | 文件 | 行号 |
+|----------|----------|------|------|
+| C2039 | 'UnregisterStartupCallback': is not a member of 'UToolMenus' | AICartographer.cpp | 26 |
+| C2065 | 'UToolMenuSection': undeclared identifier | AICartographer.cpp | 40 |
+| C2065 | 'Section': undeclared identifier | AICartographer.cpp | 40 |
+| C2065 | 'Section': undeclared identifier | AICartographer.cpp | 41 |
+| MSB307 | 构建命令退出码-1 | 构建脚本 | 50 |
+
+---
+
+## 根本原因分析
+**核心问题：UE版本API不兼容**
+1. 项目使用UE5.7版本，ToolMenus模块API发生了破坏性变更，与适配的UE5.3/5.4 API不匹配：
+   - `UToolMenus` 类已移除 `UnregisterStartupCallback` 方法
+   - `UToolMenuSection` 类已更名或废弃
+   - `UToolMenu::AddSection` 方法返回值类型已变更，无法赋值给`UToolMenuSection*`变量
+2. 最后一个MSB307错误是上述C++编译错误导致的连锁构建失败
+
+---
+
+## 修复方向建议
+有两个解决方案可选：
+1. **版本降级方案**：将项目EngineAssociation从UE5.7降级为UE5.4，匹配插件API版本
+2. **API适配方案**：针对UE5.7新ToolMenus API修改代码：
+   - 替换`UnregisterStartupCallback`为UE5.7对应的注销方法
+   - 替换`UToolMenuSection`为UE5.7对应的新类型名
+   - 调整`AddSection`调用方式适配新的返回值类型

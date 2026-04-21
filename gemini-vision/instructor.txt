@@ -1,0 +1,61 @@
+这是一份针对 AICartographer 前端（React Flow）落地的工业级实施策划。基于“语义降维”与“解耦架构”的核心原则，我们将从数据流转、布局算法到极致 UX 进行硬核拆解，确保工具具备世界级的信息压缩率与视觉信噪比。
+
+一、 数据管线与状态层 (Data Pipeline & State)
+前端不能直接消费原始 AST，必须在 C++ 提取后与 React Flow 渲染前，建立一层数据洗牌与适配器 (Adapter) 层。
+
+JSON Schema 协议标准化： 定义严格的节点（Node）与边（Edge）接口。每个 Node 必须包含 level (L0/L1/L2) 和 semanticType (Pure/Mutation/RPC) 元数据，剥离一切与视觉相关的坐标数据，坐标交由前端算法计算。
+
+Zustand 状态管理： 抛弃沉重的 Redux。使用 Zustand 构建单向数据流引擎，精准控制前端的三种全局状态：
+
+TopologyState: 当前加载的图结构（按需增量加载）。
+
+ViewportState: 视口层级（控制 L0/L1/L2 切换的阈值）。
+
+FocusState: 当前选中的节点及其高亮的上下游链路（Focus Mode）。
+
+二、 L0-L2 信息压缩与布局策略 (Semantic Compression)
+React Flow 本身只提供画布，核心的布局（Layout）与压缩算法需要引入专业的图引擎。
+
+L0 宏观层 (系统级依赖) - ELK.js 布局引擎：
+
+策略： 放弃简单的力导向图。引入 ELK.js (Eclipse Layout Kernel)，这是一款专为复杂端口（Ports）和分层连线设计的工业级布局算法。
+
+实现： 强制使用正交连线（Orthogonal Routing），从左至右构建类的依赖树与继承链，确保连线零交叉，呈现极致的秩序感。
+
+L1 中观层 (业务流转) - 节点聚合与折叠算法：
+
+策略： 信息压缩的核心战场。前端在接收到数据后，执行“纯函数剥离”算法。
+
+实现： 利用 React Flow 的 Sub-flow（嵌套图）特性。将复杂的数学计算、字符串拼接等无副作用节点，全部折叠为单一的 “运算黑盒” (Math/Logic Cluster)。在 UI 上仅暴露出输入和输出引脚，将面条代码瞬间降维成清晰的业务主干。
+
+L2 微观层 (执行链路) - 双轨追踪机制：
+
+策略： 只有当用户双击 L1 节点或“运算黑盒”时，才在局部展开 L2 细节。
+
+实现： 利用 React Flow 的 getIncomers 和 getOutgoers API 实现图遍历。分离白色的执行流（Execution Pin）和彩色的数据流（Data Pin）。点击任意 Data Pin，触发溯源算法，将与之无关的所有节点透明度降至 0.1。
+
+三、 UX 与视觉设计哲学 (Industrial Design Language)
+效率工具的视觉绝不能喧宾夺主。抛弃虚幻引擎原生蓝图那种高饱和度、繁杂的视觉噪音，全面转向**“未来复古 (Future Retro)”**的工业极简主义。
+
+几何与色彩法则：
+
+极致克制的调色板： 全局界面严格限定在 纯白 (White)、深邃黑 (Black)、工业灰 (Gray) 的基础色阶中。这是消除视觉疲劳的基础。
+
+信号色突围： 仅将高饱和度的 亮橙色 (Orange) 或电光蓝保留给最具战略价值的信息，例如：跨网络 RPC 调用（Network Node）、关键状态突变（State Mutation）或报错节点。
+
+形态构建：
+
+React Flow 的 CustomNode 必须采用极简几何切割。
+
+摒弃复杂的渐变与阴影，采用扁平化设计，配合 Apple 级别的平滑圆角 (Rounded Corners)，在硬朗的工业逻辑中注入现代 UI 的精致感。
+
+字体与排版： 使用等宽字体（Monospace，如 JetBrains Mono）渲染所有变量名和函数名，确保代码语义的严谨性与对齐美感。
+
+四、 性能风控与防崩盘机制 (Performance & Risk Control)
+蓝图节点数量可能轻易突破数千，前端必须具备底层的性能护城河。
+
+WebWorker 异步布局： ELK.js 计算几千个节点的正交布局会阻塞主线程导致页面卡死。必须将所有计算过程下放到 WebWorker 中执行，计算完成后再将坐标回传给 React Flow。
+
+Viewport Culling (视口剔除)： 强制开启 React Flow 的 onlyRenderVisibleElements 选项。视口之外的 DOM 节点全部卸载，保证即使加载上万节点的巨型蓝图，依然保持 60 FPS 的丝滑平移和缩放。
+
+LOD 语义防线： 在数据层限制 L2 微观节点的加载量。如果用户在 L0 状态下尝试直接展开整个工程的所有 L2 细节，前端应直接拦截并提示聚焦特定模块，防止无意义的内存溢出。

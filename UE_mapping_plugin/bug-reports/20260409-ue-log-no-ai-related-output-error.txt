@@ -1,0 +1,41 @@
+# UE日志无AI相关输出问题分析报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 现象 | 点击AI调用按钮后，UE编辑器日志里无相关输出，也无错误报告 |
+| 前置状态 | 扫描功能正常，生成55个节点，无崩溃错误 |
+
+---
+
+## 日志内容解读
+### 1. 正常运行日志（无任何错误）
+你提供的UE日志所有内容均为正常运行输出：
+- ✅ `[ARCHITECT] Commencing Deep Asset Scan...` / `[ARCHITECT] Scan Complete. Generated 55 nodes.`：C++后端扫描逻辑完全正常，成功生成55个节点
+- ✅ 加载的`MsSpellCheckingFacility.dll`/`BCP47Langs.dll`/`Windows.Gaming.Input.dll`/`hid.dll`等：UE编辑器运行时正常加载的Windows系统依赖库，属于常规操作
+- ✅ `ReturnHr(1) tid(1ad8) 8685C003`：Windows.Gaming.Input游戏输入模块的普通返回值，不是错误，是UE运行时的正常日志输出
+- ❌ 无任何AI相关/网络请求相关日志：属于预期行为，因为AI调用完全在前端JS层发起，UE C++层不会打印前端的网络请求/JS逻辑日志，两者完全隔离
+
+### 2. 核心结论：问题完全集中在前端层/网络层，和UE C++后端无关
+AI调用的完整链路在JavaScript前端：
+1. 点击按钮→JS触发fetch请求→Vite代理转发→火山引擎服务器返回结果→JS处理结果→更新画布
+2. 整个过程不会触发任何UE C++层的逻辑，因此UE日志里不会有任何相关输出，看不到变化是完全正常的
+
+---
+
+## 排查方向（完全不需要关注UE日志）
+所有问题排查请在**Web UI的F12开发者工具**中进行：
+1. 打开Web UI按F12→Console面板，点击AI按钮后查看：
+   - 有没有「====== LLM FATAL ERROR ======」红色错误日志？
+   - 有没有正常打印「AI Architect Result:」和聚类结果？
+   - 有没有CORS/401/404/网络请求相关错误？
+2. 切换到Network面板，查看有没有发起到`/api/volc/chat/completions`的请求，状态码是多少，响应内容是什么？
+3. 确认是否已经重启前端dev服务让Vite代理配置生效：
+   - 必须Ctrl+C终止原来的npm run dev，重新执行npm run dev，代理才会生效
+4. 确认填写的API Key/Endpoint ID正确无误
+---
+
+## 验证步骤
+1. 先重启前端dev服务，确保代理配置生效
+2. 刷新UE内的Web页面
+3. 先扫描获得55个节点，再点击AI按钮
+4. 全程观察Web UI的Console面板，而非UE编辑器日志，所有AI相关的日志/错误都会在前端控制台输出

@@ -1,0 +1,81 @@
+# UE 5.7 RPC Bridge 前端调用无响应Bug报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 项目版本 | UE 5.7 |
+| 插件 | AICartographer |
+| 现象 | 点击前端"Ping UE RPC Bridge"按钮无任何响应，UE Output Log无RPC相关日志输出 |
+| 前置确认 | 编译已通过，插件正常启动，Web页面加载正常，UE日志中存在`[ARCHITECT_PROBE] RPC Bridge Proxy Binding Executed.`和`[ARCHITECT_PROBE] WebBrowser Loaded Successfully.` |
+
+---
+
+## 根因分析（按概率排序）
+### 1. 最高概率：JS对象注入路径不匹配
+UE 5.7 新版 `SWebBrowser::BindUObject` API 行为变更：
+- 旧版 `IWebBrowserWindow::BindUObject` 会自动将对象注入到 `window.ue.[ObjectName]` 路径下
+- 新版 `SWebBrowser::BindUObject` 默认直接将对象注入到 **window 全局对象根路径**，即 `window.[ObjectName]`
+当前前端代码判断逻辑为 `if (window.ue?.cartographerbridge)`，但实际注入路径为 `window.cartographerbridge`，导致条件判断失败，调用逻辑未执行。
+
+### 2. 次高概率：绑定时机问题
+虽然代码在构造WebBrowser时立即调用了BindUObject，但此时JS上下文尚未完全初始化，对象注入失败。
+
+### 3. 其他可能原因
+- UFUNCTION 元数据缺失：Bridge类的UFUNCTION未正确标记，导致JS无法识别调用
+- WebBrowser JS交互权限未开启：UE 5.7默认可能禁用了UObject绑定权限，需要显式开启
+- BindUObject第三个参数错误：第三个参数`bPersist`语义与预期不符，导致对象未持久化注入
+
+---
+
+## 快速验证方案
+请按以下步骤定位问题：
+1. 在UE中打开AICartographer Web UI，按下F12打开Web开发者工具
+2. 在控制台输入 `window.cartographerbridge`，按回车：
+   - 如果返回对象（不是undefined）→ 确认是路径不匹配问题
+   - 如果返回undefined → 确认是绑定失败问题
+3. 在控制台直接执行 `window.cartographerbridge?.SendLogToUE("test")`，观察UE日志是否有输出
+
+---
+
+## 修复方案
+### 方案一（最高优先级，路径适配）
+修改前端调用代码，适配新版注入路径：
+```typescript
+// Sidebar.tsx 中按钮点击逻辑修改：
+if (window.cartographerbridge) { // 移除ue中间层
+  window.cartographerbridge.SendLogToUE("Hello from React ReactFlow!");
+  // ... 其余代码不变
+} else {
+  console.warn("UE Bridge not found. Are you running inside Unreal Engine?");
+}
+
+// 同时修改ue.d.ts类型声明：
+declare global {
+  interface Window {
+    cartographerbridge?: UECartographerBridge; // 直接挂载到window下
+  }
+}
+```
+
+### 方案二（绑定时机优化）
+将BindUObject调用移到OnLoadCompleted回调中，确保JS上下文初始化完成后再绑定：
+```cpp
+.OnLoadCompleted(FSimpleDelegate::CreateLambda([this]()
+{
+    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] WebBrowser Loaded Successfully."));
+    if (WebBrowserWidget.IsValid() && RPCBridge.IsValid())
+    {
+        WebBrowserWidget->BindUObject(TEXT("cartographerbridge"), RPCBridge.Get(), true);
+        UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] RPC Bridge Bound after page load."));
+    }
+}));
+```
+
+### 方案三（兜底兼容）
+如果以上方案都无效，请在前端代码中同时兼容两种路径：
+```typescript
+const bridge = window.ue?.cartographerbridge || window.cartographerbridge;
+if (bridge) {
+  bridge.SendLogToUE("Hello from React ReactFlow!");
+  // ...
+}
+```

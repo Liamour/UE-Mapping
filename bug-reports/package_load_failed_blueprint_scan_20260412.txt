@@ -1,0 +1,76 @@
+BUG REPORT: 蓝图深度扫描包加载失败错误
+Date: 2026-04-12
+Affected Component: 深度扫描参数传递链路
+Severity: Medium (功能可用但部分节点扫描失败)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+错误日志：
+```
+LogStreaming: Warning: LoadPackage: SkipPackage: /Game/Blueprint/Villagers (0xBC60219E93420217) - The package to load does not exist on disk or in the loader
+LogUObjectGlobals: Warning: 寻找对象“Blueprint 无./Game/Blueprint/Villagers”失败
+```
+关键特征：
+1. 加载的路径`/Game/Blueprint/Villagers`格式看似正常，但系统提示不存在
+2. 错误信息中对象名出现异常前缀`Blueprint 无.`，说明传入`LoadObject`的路径中包含非预期的脏数据
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+### 1. 最高概率根因：前端参数传递顺序错误
+C++端`RequestDeepScan`函数签名为：
+```cpp
+void RequestDeepScan(const FString& NodeId, const FString& AssetPath);
+```
+前端调用时如果参数顺序传反（误将路径作为第一个参数、nodeId作为第二个参数），会导致C++端接收到的`AssetPath`参数实际是nodeId的内容。
+而我们全局扫描返回的nodeId通常包含资产类型、状态等组合信息（比如错误中的`Blueprint 无.`前缀），会导致最终传入`LoadObject`的路径异常，加载失败。
+### 2. 次高概率根因：AssetPath字段值污染
+前端调用时取到的资产路径不是纯净的UE包路径：
+- 全局扫描时存入节点数据的`description`/`assetPath`字段被其他逻辑修改，混入了类型名、状态标识等内容
+- UI层点击扫描时，错误取了节点的`title`/`type`等非路径字段作为AssetPath参数传入
+### 3. 其他潜在根因：
+#### a. 资产本身问题
+- 对应蓝图资产确实被移动/删除/重命名，磁盘上不存在该路径
+- 资产是临时对象/未保存的修改，只存在内存中不在磁盘
+#### b. UE资产注册表同步问题
+- 资产注册表没有刷新，扫描时拿到了已删除资产的残留记录
+- 路径大小写不匹配（仅在大小写敏感文件系统触发）
+#### c. C++参数解析错误
+- UE CEF绑定对多参数函数的参数顺序解析异常，导致参数值错位
+==============================================================================
+QUICK VERIFICATION STEPS
+==============================================================================
+1. 打开浏览器控制台，点击扫描时观察`requestDeepScan`调用的参数顺序和值
+2. 在C++`RequestDeepScan`函数入口加日志打印`AssetPath`的值，确认是否包含异常前缀
+3. 核对对应路径下是否实际存在该蓝图资产
+==============================================================================
+FIX SOLUTIONS (No code modifications applied per requirements)
+==============================================================================
+### 1. 优先排查参数顺序
+确认前端调用`requestDeepScan(nodeId, assetPath)`的参数顺序严格匹配C++声明，顺序不能颠倒。
+### 2. 路径来源校验
+确保前端传入的AssetPath参数是纯净的UE资产路径（格式为`/Game/xxx/xxx/AssetName`，无额外前缀后缀），建议从`selectedNode.data.description`字段取值（该字段是全局扫描时原始返回的资产路径，不会被AI分析修改）。
+### 3. C++端防御性校验
+在`RequestDeepScan`函数入口增加路径合法性校验：
+```cpp
+if (!AssetPath.StartsWith(TEXT("/Game/")) || AssetPath.Contains(TEXT(" ")) || AssetPath.Contains(TEXT(".")))
+{
+    UE_LOG(LogTemp, Error, TEXT("Invalid Asset Path provided: %s"), *AssetPath);
+    return;
+}
+```
+### 4. 资产存在性预校验
+调用`LoadObject`前先通过资产注册表检查资产是否存在：
+```cpp
+FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(FName(*AssetPath));
+if (!AssetData.IsValid())
+{
+    UE_LOG(LogTemp, Error, TEXT("Asset does not exist: %s"), *AssetPath);
+    return;
+}
+```
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. C++端`RequestDeepScan`入口日志打印的AssetPath为纯净路径，无异常前缀
+2. 点击扫描后包加载成功，无相关警告
+3. AST正常提取，前端收到分析结果并更新UI

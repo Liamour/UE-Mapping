@@ -1,0 +1,65 @@
+BUG REPORT: 'SetOnLoadCompleted' is not a member of 'SWebBrowser' Compilation Error
+Date: 2026-04-12
+Affected Component: AICartographer Module WebBrowser Initialization
+Severity: Critical (blocks UE compilation)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+Build exit code 6 with 2 errors:
+```
+1. 'SetOnLoadCompleted': is not a member of 'SWebBrowser'
+2. 'FAICartographerModule::WebBrowserWidget': a lambda capture must be a variable from an enclosing function scope
+```
+Location: `AICartographer.cpp` line: `WebBrowserWidget->SetOnLoadCompleted(...)`
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+### 1. Primary Error: SWebBrowser API Misuse (100% root cause)
+Unreal Engine's `SWebBrowser` Slate widget **does NOT have a public `SetOnLoadCompleted()` method** at all in any UE version (including UE 5.7).
+The load completed callback is **only configurable during widget construction** via the Slate attribute parameter `.OnLoadCompleted(...)` in the `SAssignNew` builder chain. There is no public API to dynamically change this callback after the widget is instantiated.
+We incorrectly moved the callback out of the constructor parameter chain and tried to call a non-existent setter method.
+### 2. Secondary Error: Compiler Chain Reaction
+The second "lambda capture scope" error is a **derivative false positive** caused by the first API error breaking the C++ parser. The compiler cannot correctly resolve the scope after hitting the undefined method error, leading to an incorrect secondary error message. Fixing the first API error will automatically resolve this second error.
+==============================================================================
+BUG FIX SOLUTIONS (No code modifications applied per requirements)
+==============================================================================
+### Solution: Revert Callback to Constructor Parameter (100% UE API Compliant)
+Move the OnLoadCompleted callback **back into the SWebBrowser constructor parameter chain** where it belongs, keeping all existing logic unchanged:
+```cpp
+SAssignNew(WebBrowserWidget, SWebBrowser)
+    .InitialURL(InitialURL)
+    .ShowControls(false)
+    .SupportsTransparency(true)
+    // MOVE OnLoadCompleted BACK HERE as constructor parameter (the only supported way)
+    .OnLoadCompleted(FSimpleDelegate::CreateLambda([this, WebBrowserWidget]()
+    {
+        UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] WebBrowser Loaded. JS Context Ready."));
+        
+        // Check validity again since this executes asynchronously in the future
+        if (WebBrowserWidget.IsValid() && RPCBridge.IsValid())
+        {
+            WebBrowserWidget->BindUObject(TEXT("cartographerbridge"), RPCBridge.Get(), true);
+            UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] RPC Bridge Bound to JS Context Successfully."));
+        }
+    }));
+// Remove the invalid WebBrowserWidget->SetOnLoadCompleted(...) call entirely!
+```
+#### Key Fix Explained:
+✅ Uses **only official public SWebBrowser API** supported in all UE versions
+✅ Keeps our existing lifecycle safety logic (WebBrowserWidget value capture, validity checks) completely unchanged
+✅ Eliminates the undefined method error, which will also automatically resolve the false positive lambda capture error
+✅ Zero architecture changes required, just API call location correction
+### Optional Enhancement: Eliminate Delegate Binding Dependency on Page Load
+For even more robust architecture, move the `BindUObject` call outside the load callback entirely: UE CEF bindings survive page reloads, so we only need to bind once when creating the widget, no need to wait for page load. This simplifies the code even further.
+==============================================================================
+TEMPORARY WORKAROUND
+==============================================================================
+Comment out the entire SetOnLoadCompleted block and the BindUObject call. Frontend mock functionality will continue to work for UI testing while we fix the C++ implementation.
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. UE compiles with 0 errors
+2. Plugin tab opens successfully with no crashes
+3. Console logs "[ARCHITECT_PROBE] WebBrowser Loaded. JS Context Ready." after page load
+4. Clicking "Initialize Deep Scan" triggers the delegate callback and executes JS correctly
+5. Frontend receives the AST payload and updates UI state as expected

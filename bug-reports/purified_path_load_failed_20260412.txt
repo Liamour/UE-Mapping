@@ -1,0 +1,93 @@
+BUG REPORT: 净化后路径仍加载失败问题
+Date: 2026-04-12
+Affected Component: 深度扫描资产加载逻辑
+Severity: Medium (特定节点扫描失败，功能整体可用)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+错误日志：
+```
+LogTemp: Warning: [ARCHITECT_PROBE] Received Deep Scan Request. Raw Path: /Game/Blueprint/Villagers/AI/Tasks
+LogTemp: Warning: [ARCHITECT_PROBE] Purified Path for LoadObject: /Game/Blueprint/Villagers/AI/Tasks
+LogStreaming: Warning: LoadPackage: SkipPackage: /Game/Blueprint/Villagers/AI/Tasks - The package to load does not exist on disk or in the loader
+LogUObjectGlobals: Warning: 寻找对象“Blueprint 无./Game/Blueprint/Villagers/AI/Tasks”失败
+LogTemp: Error: [SYS_ERR] Failed to Load Blueprint at purified path: /Game/Blueprint/Villagers/AI/Tasks
+```
+关键特征：
+1. 净化后的路径格式完全符合UE标准（以/Game/开头，无脏前缀），路径污染问题已彻底解决
+2. 日志中"Blueprint 无."是UE加载目录/无效资产时返回空对象的默认显示，与之前的路径污染无关
+3. 路径末尾`Tasks`符合UE目录命名习惯，无常见蓝图资产名后缀特征
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+### 1. 最高概率根因：路径指向目录而非具体蓝图资产
+`/Game/Blueprint/Villagers/AI/Tasks`是**目录路径**，不是具体的蓝图资产路径。UE的`LoadObject`函数要求传入完整的资产路径（格式为`/Game/Path/AssetName.AssetName`或省略后缀的`/Game/Path/AssetName`），传入目录路径会直接加载失败。
+### 2. 次高概率根因：全局扫描逻辑将目录误识别为蓝图资产
+之前的`RequestGraphData`全局资产扫描实现中，资产过滤器没有排除目录类型：
+- UE资产注册表会将目录也作为`FAssetData`返回
+- 过滤规则只校验了类型为`UBlueprint`，但未排除目录，导致前端生成的部分节点对应的路径是目录路径，无法加载
+### 3. 其他潜在根因：
+#### a. 资产类型不匹配
+路径指向的资产确实存在，但不是`UBlueprint`类型（比如是`UBlueprintGeneratedClass`、`UDataAsset`、`ULevel`、`UAnimBlueprint`等），`LoadObject<UBlueprint>`类型转换失败。
+#### b. 资产未同步/未保存
+- 资产仅存在于其他开发者的本地，当前机器未同步
+- 用户刚创建的蓝图未保存，仅存在于内存中，磁盘上不存在对应包文件
+#### c. 大小写敏感问题
+在大小写敏感文件系统（Linux/开启了大小写敏感的Windows）上，路径大小写与磁盘实际路径不匹配。
+#### d. 模块未加载
+资产属于未加载的插件或工程模块，无法访问。
+==============================================================================
+QUICK VERIFICATION STEPS
+==============================================================================
+1. 打开UE内容浏览器，导航到路径`/Game/Blueprint/Villagers/AI/Tasks`，确认该路径是目录还是具体蓝图资产
+2. 如果是目录，进入目录选择任意蓝图资产，复制其完整路径，手动调用`RequestDeepScan`测试是否能加载成功
+3. 打印全局扫描返回的该节点完整数据，确认`description`字段是否为目录路径、`type`字段是否标记为Blueprint
+4. 临时添加调试日志，查询该路径对应资产类型：
+```cpp
+FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(FName(*CleanPath));
+UE_LOG(LogTemp, Warning, TEXT("Asset Class: %s"), *AssetData.AssetClassPath.ToString());
+```
+==============================================================================
+FIX SOLUTIONS (No code modifications applied per requirements)
+==============================================================================
+### 1. 临时解决方案
+前端点击扫描时校验路径是否为目录，手动补充资产名后缀；或点击目录下的具体蓝图资产节点进行扫描。
+### 2. 全局扫描逻辑加固（C++端）
+修改`RequestGraphData`中的资产过滤规则，排除目录类型：
+```cpp
+FARFilter Filter;
+Filter.PackagePaths.Add(FName("/Game/"));
+Filter.bRecursivePaths = true;
+Filter.ClassPaths.Add(UBlueprint::StaticClass()->GetClassPathName());
+// 新增过滤规则：只返回磁盘上存在的实际资产，排除目录
+Filter.bIncludeOnlyOnDiskAssets = true;
+Filter.bRecursiveClasses = true;
+```
+### 3. C++端资产有效性前置校验
+在`RequestDeepScan`加载蓝图前，通过资产注册表校验资产有效性：
+```cpp
+FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+FAssetData AssetData = AssetRegistryModule.Get().GetAssetByObjectPath(FName(*CleanPath));
+if (!AssetData.IsValid())
+{
+    UE_LOG(LogTemp, Error, TEXT("[SYS_ERR] Asset does not exist: %s"), *CleanPath);
+    return;
+}
+if (AssetData.AssetClassPath != UBlueprint::StaticClass()->GetClassPathName())
+{
+    UE_LOG(LogTemp, Error, TEXT("[SYS_ERR] Asset is not a Blueprint: %s, Type: %s"), *CleanPath, *AssetData.AssetClassPath.ToString());
+    return;
+}
+```
+### 4. 前端交互优化
+给目录/非蓝图类型节点添加标识：
+- 禁用深度扫描按钮
+- 点击时提示"该节点是目录/非蓝图资产，请选择目录下的具体蓝图资产进行扫描"
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. 输入正确的完整蓝图资产路径调用`RequestDeepScan`，加载成功，AST正常提取，无错误日志
+2. 全局扫描返回的节点不再包含目录路径，所有节点对应的路径都是可加载的蓝图资产
+3. 点击非蓝图/目录节点，会显示清晰的错误提示，无引擎层面加载错误日志
+4. 扫描结果正确返回，前端展示AI分析结果和标签

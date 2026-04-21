@@ -1,0 +1,91 @@
+BUG REPORT: Lambda Capture Scope & Lifecycle Compilation Error
+Date: 2026-04-12
+Affected Component: AICartographer Module Delegate Binding Logic
+Severity: Critical (blocks UE compilation)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+Build exit code 6 with multiple related errors:
+```
+1. 'WebBrowserWidget' cannot be implicitly captured because no default capture mode has been specified
+2. 'FAICartographerModule::WebBrowserWidget': a lambda capture must be a variable from an enclosing function scope
+3. 'WebBrowserWidget': undeclared identifier
+```
+
+Location: `AICartographer.cpp` `OnLoadCompleted` delegate lambda callback, inner `OnDeepScanResult.BindLambda` call.
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+### 1. Critical Lambda Scope Chain Break (Primary Cause)
+We are trying to capture `WebBrowserWidget` inside an **inner lambda** that is defined within another outer lambda (`OnLoadCompleted` callback), but:
+- `WebBrowserWidget` is a **local stack variable** of the `OnSpawnPluginTab` function
+- The outer `OnLoadCompleted` lambda only captures `[this]`, it **does NOT capture `WebBrowserWidget`**
+- The inner lambda cannot access variables from the parent function scope unless they are first captured by the outer lambda
+- The compiler cannot find `WebBrowserWidget` in any accessible scope, so it incorrectly assumes we are trying to access a class member variable (which does not exist), causing all the subsequent errors.
+
+### 2. Hidden Memory Safety Issue (Critical Runtime Bug if Compiled)
+Even if this code compiled, it would crash at runtime:
+- `WebBrowserWidget` is a local stack variable that gets destroyed when `OnSpawnPluginTab` function exits
+- The `OnLoadCompleted` callback executes **asynchronously** after the web page finishes loading, long after the function exits
+- Without capturing the `WebBrowserWidget` shared pointer in the lambda, the widget will be destroyed, and the callback will access a dangling pointer.
+==============================================================================
+BUG FIX SOLUTIONS (No code modifications applied per requirements)
+==============================================================================
+### Solution: Complete Capture Chain Fix
+Fix both scope and lifecycle issues in one change, fully UE API compliant:
+```cpp
+// Modify OUTER OnLoadCompleted lambda capture to also capture WebBrowserWidget BY VALUE (extends lifecycle)
+.OnLoadCompleted(FSimpleDelegate::CreateLambda([this, WebBrowserWidget]() // ADD WebBrowserWidget to outer capture list!
+{
+    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] WebBrowser Loaded. JS Context Ready."));
+    if (WebBrowserWidget.IsValid() && RPCBridge.IsValid())
+    {
+        // Inner lambda now can safely capture WebBrowserWidget from outer lambda scope
+        RPCBridge->OnDeepScanResult.BindLambda([WebBrowserWidget](const FString& NodeId, const FString& ASTJson)
+        {
+            if (WebBrowserWidget.IsValid())
+            {
+                FString JSCommand = FString::Printf(TEXT("window.receiveDeepScan(\"%s\", %s)"), *NodeId, *ASTJson);
+                WebBrowserWidget->ExecuteJavascript(JSCommand);
+            }
+        });
+        
+        WebBrowserWidget->BindUObject(TEXT("cartographerbridge"), RPCBridge.Get(), true);
+        UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] RPC Bridge Bound to JS Context Successfully."));
+    }
+}));
+```
+#### Key Fixes Explained:
+1. **Capture Chain Complete**: Outer lambda captures `WebBrowserWidget` by value, making it available to the inner lambda
+2. **Lifetime Safety**: Capturing the `TSharedPtr` by value increments its reference count, ensuring the WebBrowserWidget is not destroyed while the callbacks are active
+3. **100% UE Compliant**: Uses standard C++ lambda capture semantics, no hacky workarounds
+4. **Zero Overhead**: Shared pointer capture is extremely lightweight, no performance impact
+### Alternative Optimized Solution (No Nested Lambda)
+Avoid nested lambda complexity entirely by binding the delegate earlier before the OnLoadCompleted callback:
+```cpp
+// Bind delegate immediately after creating WebBrowserWidget (outside OnLoadCompleted)
+RPCBridge->OnDeepScanResult.BindLambda([WeakBrowserPtr = WebBrowserWidget.ToWeakPtr()](const FString& NodeId, const FString& ASTJson)
+{
+    if (TSharedPtr<SWebBrowser> BrowserPtr = WeakBrowserPtr.Pin())
+    {
+        FString JSCommand = FString::Printf(TEXT("window.receiveDeepScan(\"%s\", %s)"), *NodeId, *ASTJson);
+        BrowserPtr->ExecuteJavascript(JSCommand);
+    }
+});
+```
+This is even more robust:
+- Uses weak pointer capture to avoid circular references
+- Delegate is bound earlier, no dependency on page load completion
+- No nested lambda scope issues
+==============================================================================
+TEMPORARY WORKAROUND
+==============================================================================
+Comment out the entire delegate binding block for testing. Frontend mock functionality will continue to work for UI validation while we fix the C++ implementation.
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. UE compiles with 0 errors
+2. Deep scan execution triggers no crashes
+3. Console logs "DEEP SCAN AST RECEIVED:" with valid payload
+4. Sidebar status updates correctly from "scanning" to "completed"
+5. Multiple consecutive scans work without memory leaks or dangling pointer crashes

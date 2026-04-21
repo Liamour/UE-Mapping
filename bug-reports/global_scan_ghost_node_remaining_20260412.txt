@@ -1,0 +1,105 @@
+BUG REPORT: 全局扫描仍残留无效目录节点问题
+Date: 2026-04-12
+Affected Component: 全局资产扫描过滤逻辑
+Severity: Medium (少量无效节点残留，深度扫描防御层正常工作无崩溃)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+错误日志：
+```
+LogTemp: Warning: [ARCHITECT_PROBE] Asset Registry Found 55 assets.
+LogTemp: Warning: [ARCHITECT] Scan Complete. Generated 55 nodes.
+LogTemp: Warning: [ARCHITECT_PROBE] Received Deep Scan Request. Raw Path: /Game/Blueprint/Interactable/Resources
+LogTemp: Warning: [ARCHITECT_PROBE] Purified Path for LoadObject: /Game/Blueprint/Interactable/Resources
+LogTemp: Error: [SYS_ERR] Pre-flight aborted. No asset found at package path (Likely a directory): /Game/Blueprint/Interactable/Resources
+```
+关键特征：
+1. 全局扫描返回了55个资产，基础过滤规则正常工作，但仍有少量目录路径混入
+2. 深度扫描的前置预检逻辑正确拦截了无效路径，未触发引擎加载崩溃，防御层完全生效
+3. 问题根源在全局扫描过滤不彻底，而非深度扫描逻辑
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+### 1. 最高概率根因：UE资产注册表`bIncludeOnlyOnDiskAssets`过滤不完全
+UE的`bIncludeOnlyOnDiskAssets`仅保证资产存在于磁盘，但不会主动排除目录类型：
+- 部分UE版本中，资产注册表会将包含资产的目录也作为合法结果返回，尤其是目录下有资产时
+- 资产注册表本地缓存未刷新，残留了已删除/移动的资产路径记录
+### 2. 次高概率根因：全局扫描返回的路径不是标准包路径
+全局扫描构建节点数据时，`description`字段可能取了错误的路径来源：
+- 错误使用`Asset.AssetName`/`Asset.ObjectPath`而非`Asset.PackagePath.ToString()`
+- 路径末尾多了/或者其他特殊字符，导致`GetAssetsByPackageName`匹配失败
+### 3. 其他潜在根因：
+#### a. 蓝图子类识别问题
+部分特殊蓝图类型（如`UAnimBlueprint`、`UWidgetBlueprint`、`ULevelBlueprint`）的`AssetClassPath.GetAssetName()`不是严格的`"Blueprint"`，被过滤规则误保留
+#### b. 大小写敏感问题
+路径大小写与资产注册表中的存储不匹配，导致`GetAssetsByPackageName`查询不到
+#### c. 路径格式问题
+部分路径包含空格、特殊字符或尾斜杠，导致匹配失败
+==============================================================================
+QUICK VERIFICATION STEPS
+==============================================================================
+1. 清空UE资产注册表缓存：删除项目`Saved/AssetRegistry.bin`文件后重启编辑器，重新扫描
+2. 打印全局扫描返回的每个资产详细信息，确认无效路径对应的资产类型：
+```cpp
+for (const FAssetData& Asset : AssetList) 
+{
+    UE_LOG(LogTemp, Warning, TEXT("Asset: %s, Class: %s, Package: %s, IsDir: %d"), 
+        *Asset.AssetName.ToString(), 
+        *Asset.AssetClassPath.GetAssetName().ToString(), 
+        *Asset.PackagePath.ToString(),
+        Asset.IsDirectory());
+    if (Asset.PackagePath.ToString() == TEXT("/Game/Blueprint/Interactable/Resources"))
+    {
+        UE_LOG(LogTemp, Error, TEXT("GHOST NODE FOUND! Path is directory, filtered out incorrectly"));
+    }
+}
+```
+3. 手动查询该路径是否存在资产：在UE控制台输入`AssetRegistry.DumpPackageInfo /Game/Blueprint/Interactable/Resources`，查看返回结果
+==============================================================================
+FIX SOLUTIONS (No code modifications applied per requirements)
+==============================================================================
+### 1. 全局扫描过滤规则增强
+新增多层校验逻辑，彻底过滤Ghost Node：
+```cpp
+// 在过滤后循环处理资产时新增多层校验
+for (const FAssetData& Asset : AssetDataList) 
+{
+    // 校验1：排除目录类型
+    if (Asset.IsDirectory()) continue;
+    // 校验2：确认是合法Blueprint类型（包括所有子类）
+    if (!Asset.GetClass() || !Asset.GetClass()->IsChildOf<UBlueprint>()) continue;
+    // 校验3：路径格式验证
+    FString PackagePath = Asset.PackagePath.ToString();
+    if (!PackagePath.StartsWith(TEXT("/Game/")) || PackagePath.EndsWith(TEXT("/")) || PackagePath.Contains(TEXT(" "))) continue;
+    // 校验4：确认包文件实际存在
+    FString PackageFilePath = FPaths::ProjectContentDir() / PackagePath.Mid(6) + TEXT(".uasset");
+    if (!FPaths::FileExists(PackageFilePath)) continue;
+    // ... 原有节点构建逻辑 ...
+}
+```
+### 2. 路径标准化处理
+全局扫描返回的路径统一标准化，避免格式问题：
+```cpp
+// 构建description字段时使用纯净包路径
+FString CleanAssetPath = Asset.PackagePath.ToString();
+// 移除多余字符，标准化格式
+CleanAssetPath = CleanAssetPath.Replace(TEXT("."), TEXT("")).TrimStartAndEnd();
+if (CleanAssetPath.EndsWith(TEXT("/"))) CleanAssetPath = CleanAssetPath.LeftChop(1);
+NodeData->SetStringField(TEXT("description"), CleanAssetPath);
+```
+### 3. 资产注册表强制刷新
+全局扫描前先强制刷新资产注册表，保证数据最新：
+```cpp
+// 强制刷新资产注册表，清除过期缓存
+AssetRegistryModule.Get().SearchAllAssets(true);
+// 执行扫描
+AssetRegistryModule.Get().GetAssets(Filter, AssetDataList);
+```
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. 全局扫描返回的节点数量下降，所有无效目录节点被彻底过滤
+2. 点击任意节点，深度扫描预检全部通过，无`No asset found at package path`错误
+3. 蓝图加载成功，AST提取正常，前端返回分析结果和标签
+4. 多次扫描结果一致，无无效节点重复出现
+5. 所有返回节点的路径都指向实际存在的`.uasset`文件

@@ -1,0 +1,56 @@
+# 扫描后仍显示初始测试节点问题分析报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 现象 | 点击扫描按钮后，前端控制台显示收到55个节点，但画布始终显示初始的2个测试节点，无新节点渲染 |
+| 前置验证 | 后端编译正常，前端控制台输出Parsed Nodes Count: 55，数据已成功传输到前端 |
+
+---
+
+## 根因分析（按概率从高到低）
+### 1. 最高概率：Zustand状态被初始化逻辑覆盖（90%）
+GraphCanvas组件的useEffect逻辑优先级高于扫描更新：
+```tsx
+useEffect(() => {
+  // 注入初始测试节点
+  setInitialGraph(safeNodes, initialEdges);
+}, [setInitialGraph]);
+```
+- 扫描后调用setNodes更新了状态，但随后useEffect再次执行setInitialGraph，将节点覆盖回初始2个测试节点
+- 原因：setInitialGraph未使用useCallback包裹，每次渲染都会生成新的函数引用，导致useEffect重复触发
+- 或初始化逻辑在扫描完成后执行，覆盖了用户扫描的结果
+
+### 2. 次高概率：setNodes方法未正确实现immutable更新
+useGraphStore中的setNodes方法存在缺陷：
+- 方法内部直接修改了原数组而非返回新的数组引用，React无法检测到状态变更
+- 示例错误实现：`setNodes: (newNodes) => state.nodes = newNodes`（无返回新状态）
+- 正确实现应该是：`setNodes: (newNodes) => ({ nodes: newNodes })`
+
+### 3. 中等概率：状态更新被过滤逻辑拦截
+GraphCanvas组件的前置校验逻辑：
+```tsx
+if (!nodes || nodes.length === 0 || !nodes.every(n => n.position && typeof n.position.x === 'number' && typeof n.position.y === 'number')) {
+  return <div className="flex items-center justify-center w-full h-full text-slate-500 bg-slate-900">Initializing Engine Data...</div>;
+}
+```
+- 后端返回的部分节点position字段不符合要求（如x/y不是数字、格式错误），导致整个nodes数组被拦截，回退到初始状态
+- 但用户可见初始测试节点，说明此判断未触发，概率相对较低
+
+### 4. 低概率：Zustand状态上下文隔离问题
+- Sidebar组件中调用`useGraphStore.getState().setNodes()`更新的状态，与GraphCanvas组件订阅的状态不属于同一个store实例
+- 项目中存在多个Zustand store实例，导致状态无法同步
+
+---
+
+## 验证排查步骤
+### 第一步：验证状态更新生效
+1. 在Sidebar.tsx的`if (parsedData.nodes) setNodes(parsedData.nodes)`之后添加日志：`console.log("After setNodes, store state:", useGraphStore.getState().nodes.length)`，确认setNodes调用后store中的节点数量是否为55
+2. 在GraphCanvas组件中添加useEffect：`useEffect(() => console.log("GraphCanvas nodes changed:", nodes.length), [nodes])`，观察扫描后是否触发了nodes更新，日志显示是2还是55
+
+### 第二步：验证初始化逻辑执行时机
+1. 在GraphCanvas的useEffect中添加日志：`console.log("setInitialGraph called, resetting to 2 nodes")`，观察扫描后是否触发了此日志
+2. 如果扫描后确实触发了此日志，确认是初始化逻辑覆盖了扫描结果
+
+### 第三步：验证setNodes方法实现
+1. 打开useGraphStore.ts文件，检查setNodes方法是否正确返回新的状态对象，而非直接修改原state
+2. 检查setInitialGraph方法是否也修改了nodes状态，导致覆盖

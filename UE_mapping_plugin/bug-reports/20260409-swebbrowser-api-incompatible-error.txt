@@ -1,0 +1,38 @@
+# UE 5.7 SWebBrowser API 不兼容Bug报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 项目版本 | UE 5.7 |
+| 插件 | AICartographer |
+| 错误数量 | 3个C++编译错误 |
+| 影响范围 | 插件完全无法编译加载 |
+
+---
+
+## 错误明细
+| 错误代码 | 错误描述 | 文件 | 行号 |
+|----------|----------|------|------|
+| C2039 | 'SetOnLoadCompleted': is not a member of 'SWebBrowser' | AICartographer.cpp | 45 |
+| C2039 | 'GetWebBrowserWindow': is not a member of 'SWebBrowser' | AICartographer.cpp | 47 |
+| MSB307 | 构建命令退出码-1 | 构建脚本 | 50 |
+
+---
+
+## 根本原因分析
+**核心问题：UE 5.7 SWebBrowser API 破坏性变更**
+1. `SWebBrowser` 类已移除 `SetOnLoadCompleted` 方法，该方法用于监听页面加载完成事件
+2. `SWebBrowser` 类已移除 `GetWebBrowserWindow` 方法，该方法用于获取底层浏览器窗口对象进行UObject绑定
+3. 最后一个MSB307错误是上述C++编译错误导致的连锁构建失败
+4. 当前RPC桥接实现基于UE5.4及更早版本的SWebBrowser API，与UE5.7不兼容
+
+---
+
+## 临时解决方案建议
+### 最小成本兼容方案（保证编译通过，暂保留核心功能）
+1. 注释掉OnSpawnPluginTab中所有RPC桥接绑定相关代码，仅保留基础WebBrowser创建逻辑
+2. 移除Bridge类相关依赖，先保证插件可以正常编译启动，Web页面可以正常加载
+3. 后续待确认UE5.7新的WebBrowser API后再重新实现RPC桥接功能
+
+### 长期解决方案
+1. 降级到UE5.4 LTS稳定版本，使用成熟稳定的WebBrowser API进行桥接开发
+2. 查阅UE5.7源码中WebBrowser模块的新API，适配新的事件监听和UObject绑定方式

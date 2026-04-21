@@ -1,0 +1,53 @@
+# [BUG SUMMARY]
+TypeScript interface export error: 'NodeData' export not found in '/src/types/graph.ts' module at runtime
+
+## [STACK TRACE / LOGS]
+```
+[error] SyntaxError: The requested module '/src/types/graph.ts' does not provide an export named 'NodeData'
+```
+
+## [ENVIRONMENT & STATE CONTEXT]
+- **OS:** Windows
+- **Vite Version:** 8.0.7
+- **TypeScript Version:** 5.x (default from vite react-ts template)
+- **Module System:** ESM
+- **Project State:** TailwindCSS v4 PostCSS fix completed, dev server restarting
+
+## [CODE CONTEXT]
+**src/types/graph.ts exports:**
+```typescript
+export interface NodeData {
+  title: string;
+  type: NodeType;
+  description: string;
+  methods: string[];
+}
+```
+
+**Import usage example (src/store/useGraphStore.ts):**
+```typescript
+import { NodeData } from '../types/graph';
+```
+
+## [ROOT CAUSE HYPOTHESIS]
+TypeScript `interface` is a compile-time only construct that does not exist in runtime JavaScript. When importing without the `type` modifier in ESM mode, Vite attempts to resolve it as a runtime export which does not exist, causing the SyntaxError. This is expected behavior in TypeScript ESM projects with `isolatedModules` enabled.
+
+## [PROPOSED SOLUTIONS]
+**Fix (Required):**
+1. Convert all imports of TypeScript types/interfaces to use type-only imports:
+```typescript
+// Before
+import { NodeData } from '../types/graph';
+
+// After
+import type { NodeData } from '../types/graph';
+```
+
+**Affected files requiring update:**
+- `src/store/useGraphStore.ts`
+- `src/components/graph/nodes/SystemNode.tsx`
+- `src/components/graph/GraphCanvas.tsx`
+- `src/components/layout/Sidebar.tsx`
+
+**Verification Step:**
+After fixing all imports, clear Vite cache and restart dev server: `npm run dev -- --force`

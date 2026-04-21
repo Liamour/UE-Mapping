@@ -1,0 +1,90 @@
+# BUG SUMMARY
+JSON export functionality fails in UE CEF embedded browser:
+1. Clicks on export buttons throw Windows SIP encryption module errors in UE log
+2. No file save location dialog appears, files are downloaded silently to default path with no user feedback
+
+## STACK TRACE / LOGS
+```
+onecore\printscan\appxpackaging\signing\src\appxsip.cpp(612)\AppxSip.dll!000001A7DD604E92: (caller: 00007FFB6504AC11) ReturnHr(1) tid(11e8) 80070032 不支持该请求。
+onecore\printscan\appxpackaging\signing\src\appxbundlesip.cpp(693)\AppxSip.dll!000001A7DD6054F2: (caller: 00007FFB6504AC11) ReturnHr(2) tid(11e8) 80070032 不支持该请求。
+onecore\printscan\appxpackaging\signing\src\extensionssip.cpp(181)\AppxSip.dll!000001A7DD62810D: (caller: 000001A7DD628ABF) ReturnHr(3) tid(11e8) 80070032 不支持该请求。
+onecore\printscan\appxpackaging\signing\src\eappxsip.cpp(461)\AppxSip.dll!000001A7DD6066AC: (caller: 00007FFB6504AC11) ReturnHr(4) tid(11e8) 80070032 不支持该请求。
+```
+Error code: 0x80070032 (ERROR_NOT_SUPPORTED)
+Source: Windows SIP (Subject Interface Package) digital signature validation module
+
+## ENVIRONMENT & STATE CONTEXT
+- Runtime: Unreal Engine 5.x embedded CEF (Chromium Embedded Framework) browser
+- OS: Windows 10/11
+- Export implementation: Pure front-end Blob API + `<a>` tag download pattern
+- Expected behavior: File save dialog appears, user selects save location
+- Actual behavior: Silent download + system-level error logs
+
+## CODE CONTEXT
+```typescript
+// Current export implementation (exportUtils.ts)
+export const downloadJson = (data: any, filename: string) => {
+    try {
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    } catch (error) {
+        console.error("Failed to export JSON:", error);
+    }
+};
+```
+**Issue:** The standard browser download pattern uses programmatic click on `<a>` tag, which bypasses UE CEF's standard download flow.
+
+## ROOT CAUSE HYPOTHESIS
+1. **CEF Security Restriction:** UE embedded CEF has restricted default download policies:
+   - Programmatic `a.click()` downloads are treated as untrusted and do not trigger save dialog
+   - Blob URL downloads bypass standard Windows file system validation flow
+2. **Windows SIP Module False Positive:** The unmanaged download flow triggers Windows Appx digital signature validation, which rejects the unsigned dynamic file download request with 0x80070032 "not supported" error
+3. **No User Feedback:** Current implementation has no success/error notifications, user has no indication if export completed
+
+## PROPOSED SOLUTIONS
+### Solution 1 (Recommended: Native UE Integration)
+Export functionality should be delegated to UE native layer via RPC bridge:
+```typescript
+// Frontend only sends data to UE
+const exportViaUE = (data: any, filename: string) => {
+    const bridge = window.cartographerbridge || window.ue?.cartographerbridge;
+    if (bridge?.exportJson) {
+        bridge.exportJson(JSON.stringify(data, null, 2), filename);
+    }
+};
+```
+UE side implements:
+- Open native Windows save file dialog
+- Write JSON data directly to user-selected path
+- No browser/CEF limitations
+
+### Solution 2 (CEF Configuration Workaround)
+Update UE CEF configuration to enable:
+- Allow file downloads from local origins
+- Enable "save as" dialog for all download types
+- Disable Appx/SIP signature validation for local web content
+
+### Solution 3 (Frontend Fallback)
+Fallback to Data URI scheme which has better CEF compatibility:
+```typescript
+export const downloadJson = (data: any, filename: string) => {
+    const jsonStr = JSON.stringify(data, null, 2);
+    const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(jsonStr);
+    const a = document.createElement('a');
+    a.href = dataUri;
+    a.download = filename;
+    a.click();
+    
+    // Add user notification
+    alert(`Exported ${filename} to default downloads folder`);
+};
+```
+
+All solutions resolve both the error log issue and missing save dialog problem.

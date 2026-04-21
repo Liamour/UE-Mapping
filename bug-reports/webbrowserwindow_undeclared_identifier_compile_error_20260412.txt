@@ -1,0 +1,92 @@
+BUG REPORT: 'WebBrowserWindow' Undeclared Identifier Compile Error
+Date: 2026-04-12
+Affected Component: C++ AICartographerBridge RPC Implementation
+Severity: Critical (blocks UE plugin compilation)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+Build exit code -1 with two identical errors:
+```
+'WebBrowserWindow': undeclared identifier
+```
+
+Location: `AICartographerBridge.cpp` lines that call `WebBrowserWindow.IsValid()` and `WebBrowserWindow->ExecuteJavascript()`
+==============================================================================
+ROOT CAUSES
+==============================================================================
+Cause 1: Missing Member Variable Declaration (Primary Cause)
+------------------------------------------------------------------------------
+The `UAICartographerBridge` class in `AICartographerBridge.h` does NOT have a `WebBrowserWindow` member variable declared. We added references to this variable in the cpp file during the recent callback injection modification, but never added the corresponding class member definition.
+
+The bridge class has no persistent storage for the WebBrowser instance pointer.
+
+Cause 2: Missing Header Dependency (Secondary Potential Cause)
+------------------------------------------------------------------------------
+Even if the member variable was declared, we are missing the required header include for the WebBrowser type:
+```cpp
+#include "WebBrowser/Public/IWebBrowserWindow.h"
+```
+Without this include, the `IWebBrowserWindow` type is undefined, leading to the same undeclared identifier error even if the member exists.
+
+Cause 3: Missing Initialization Logic (Future Runtime Error if not Fixed)
+------------------------------------------------------------------------------
+Even after adding the declaration and include, we have no code that assigns a valid WebBrowser instance to this member variable. Without initialization, `WebBrowserWindow.IsValid()` will always return false at runtime, and JS callbacks will never be sent to the frontend.
+==============================================================================
+BUG FIX SOLUTIONS (No code modifications applied per requirements)
+==============================================================================
+Step 1: Update AICartographerBridge.h
+------------------------------------------------------------------------------
+Add header include and declare member variable:
+```cpp
+#include "WebBrowser/Public/IWebBrowserWindow.h"
+
+class AICARTOGRAPHER_API UAICartographerBridge : public UObject
+{
+    GENERATED_BODY()
+    // ... existing members ...
+private:
+    TSharedPtr<IWebBrowserWindow> WebBrowserWindow;
+    // ... existing private members ...
+};
+```
+
+Step 2: Add Instance Initialization Logic
+------------------------------------------------------------------------------
+Choose one of the following initialization methods:
+Option A (Bridge Binding Pattern):
+Add a public setter method called by the WebUI module when the browser window is created:
+```cpp
+UFUNCTION(BlueprintCallable, Category = "AICartographer|Bridge")
+void SetWebBrowserWindow(TSharedPtr<IWebBrowserWindow> InWebBrowserWindow)
+{
+    WebBrowserWindow = InWebBrowserWindow;
+}
+```
+
+Option B (Dynamic Lookup Pattern):
+No member variable needed. Dynamically get the active WebBrowser instance at call time (eliminates need for persistent state):
+```cpp
+// Replace direct WebBrowserWindow usage in RequestDeepScan with:
+#include "WebBrowser/Public/WebBrowserModule.h"
+
+IWebBrowserModule& WebBrowserModule = FModuleManager::LoadModuleChecked<IWebBrowserModule>("WebBrowser");
+TSharedPtr<IWebBrowserWindow> ActiveBrowser = WebBrowserModule.GetFirstActiveWebBrowserWindow();
+if (ActiveBrowser.IsValid())
+{
+    FString JSCommand = FString::Printf(TEXT("window.receiveDeepScan(\"%s\", %s)"), *NodeId, *OutputJson);
+    ActiveBrowser->ExecuteJavascript(JSCommand);
+}
+```
+
+Step 3: Runtime Validation
+------------------------------------------------------------------------------
+Verify that:
+1. Plugin compiles with 0 errors
+2. Clicking "Initialize Deep Scan" does not crash UE
+3. Console logs "DEEP SCAN AST RECEIVED:" message with valid nodeId and AST data
+4. Sidebar updates correctly with scan status and analysis result
+==============================================================================
+TEMPORARY WORKAROUND FOR TESTING
+==============================================================================
+For immediate frontend functionality testing without fixing C++ code:
+Comment out all WebBrowserWindow related code in RequestDeepScan function, rely exclusively on the frontend mock fallback path for UI validation. This will bypass the C++ to JS callback mechanism entirely, but allows testing all UI/UX interactions locally.

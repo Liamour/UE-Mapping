@@ -1,0 +1,118 @@
+BUG REPORT: Deep Scan Field Overwrite & Log Missing Issue
+Date: 2026-04-12
+Affected Component: Deep Scan Pipeline & UI Rendering
+Severity: High
+==============================================================================
+ISSUE 1: Asset Path Overwritten By LLM Analysis Result
+==============================================================================
+Description:
+Node card's bottom path display (originally shows package path) is replaced by LLM analysis description after deep scan, violating requirement that path info should remain unchanged, analysis result should only display in sidebar Node Metadata.
+
+Root Cause:
+File: src/services/engineBridge.ts | Lines 29-31
+```typescript
+useGraphStore.getState().updateNodeMeta(nodeId, { 
+  description: aiResult.description, // Directly overwrites original description field which stores asset path
+  tags: aiResult.tags 
+});
+```
+The `description` field in node data is designed to store package path, but currently it's directly overwritten by LLM analysis result, leading to path information loss on node UI.
+
+Affected UI Code:
+File: src/components/graph/nodes/SystemNode.tsx | Lines 108-110
+```tsx
+<p className="w-full text-center text-[11px] text-gray-400 font-mono truncate leading-relaxed">
+  {description} // Renders the overwritten description instead of original path
+</p>
+```
+==============================================================================
+ISSUE 2: Expected "DEEP SCAN AST RECEIVED" Log Missing
+==============================================================================
+Description:
+Users can't find the familiar "DEEP SCAN AST RECEIVED" log in console, even though deep scan works correctly and tags are updated.
+
+Root Cause:
+The log entry was removed when we purged the duplicate callback from App.tsx. The current log in engineBridge.ts has different content:
+File: src/services/engineBridge.ts | Line 23
+```typescript
+console.log(`Received AST for Node ${nodeId}:`, astData); // Log content differs from original expected log
+```
+==============================================================================
+REQUIRED IMPLEMENTATION MEASURES
+==============================================================================
+1. Field Structure Adjustment:
+   Add 3 new fields to node metadata instead of overwriting description:
+   - `scanStatus`: enum ["idle", "scanning", "completed", "failed"]
+   - `analysisResult`: string, stores LLM analysis description
+   - `scanError`: string, stores error message if scan fails
+
+2. Pipeline Update:
+   File: src/services/engineBridge.ts
+   - In requestDeepScan() function, first update node status:
+     ```typescript
+     useGraphStore.getState().updateNodeMeta(nodeId, {
+       scanStatus: "scanning"
+     });
+     ```
+   - In receiveDeepScan() success case:
+     ```typescript
+     useGraphStore.getState().updateNodeMeta(nodeId, {
+       scanStatus: "completed",
+       analysisResult: aiResult.description, // Don't overwrite description
+       tags: aiResult.tags
+     });
+     ```
+   - Add error handling:
+     ```typescript
+     catch (e) {
+       useGraphStore.getState().updateNodeMeta(nodeId, {
+         scanStatus: "failed",
+         scanError: e.message
+       });
+     }
+     ```
+
+3. UI Rendering Adjustment:
+   - SystemNode.tsx: Keep displaying original `description` (path) unchanged
+   - Sidebar.tsx: In Node Metadata section, display scan status, analysis result and error info instead of reusing description field:
+     ```tsx
+     {/* Scan Status Display */}
+     <div className="mb-4">
+       <span className="block text-[10px] text-[#666666] font-bold uppercase tracking-widest mb-1.5">
+         Scan Status
+       </span>
+       <p className={`text-xs font-mono ${
+         selectedNode.data?.scanStatus === 'failed' ? 'text-red-400' : 
+         selectedNode.data?.scanStatus === 'scanning' ? 'text-yellow-400' : 'text-green-400'
+       }`}>
+         {selectedNode.data?.scanStatus === 'scanning' ? '🔍 Scanning in progress...' :
+          selectedNode.data?.scanStatus === 'failed' ? `❌ Failed: ${selectedNode.data.scanError}` :
+          selectedNode.data?.scanStatus === 'completed' ? '✅ Analysis completed' : '⏸️ Not scanned'}
+       </p>
+     </div>
+     
+     {/* Analysis Result */}
+     {selectedNode.data?.analysisResult && (
+       <div className="mb-4">
+         <span className="block text-[10px] text-[#666666] font-bold uppercase tracking-widest mb-1.5">
+           Analysis Result
+         </span>
+         <p className="text-xs text-[#b3b3b3] font-mono leading-relaxed">
+           {selectedNode.data.analysisResult}
+         </p>
+       </div>
+     )}
+     ```
+
+4. Log Adjustment:
+   Restore the expected log entry for easier debugging:
+   ```typescript
+   console.log("DEEP SCAN AST RECEIVED:", { nodeId, astData });
+   ```
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. Node card always displays original package path, never overwritten after deep scan
+2. Sidebar Node Metadata shows scan status (scanning/completed/failed) and analysis result/error
+3. "DEEP SCAN AST RECEIVED" log appears in console when scan completes
+4. Tags update correctly in both sidebar and node UI

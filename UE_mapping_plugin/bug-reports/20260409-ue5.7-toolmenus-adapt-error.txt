@@ -1,0 +1,37 @@
+# UE 5.7 ToolMenus 适配失败Bug报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 项目版本 | UE 5.7 |
+| 插件 | AICartographer |
+| 错误数量 | 3个C++编译错误 |
+| 影响范围 | 插件完全无法编译加载 |
+
+---
+
+## 错误明细
+| 错误代码 | 错误描述 | 文件 | 行号 |
+|----------|----------|------|------|
+| C2039 | 'RemoveOwner': is not a member of 'UToolMenus' | AICartographer.cpp | 31 |
+| C2660 | 'UToolMenu::AddSection': function does not take 4 arguments | AICartographer.cpp | 43 |
+| MSB307 | 构建命令退出码6 | 构建脚本 | 44 |
+
+---
+
+## 根本原因分析
+**核心问题：UE 5.7 ToolMenus API版本不匹配**
+1. `RemoveOwner` 方法不存在于当前UE5.7版本的UToolMenus类中，说明该API仍处于不稳定变更状态
+2. `UToolMenu::AddSection` 方法签名与预期不符，当前版本只接受最多2个参数，不支持4参数重载
+3. 最后一个MSB307错误是上述C++编译错误导致的连锁构建失败
+
+---
+
+## 临时解决方案建议
+### 兼容修复方案（最低成本适配当前UE5.7版本）
+1. **移除菜单注册逻辑**：暂时放弃顶部菜单注入，保持Tab Spawner为Enabled状态，用户可通过Window -> Developer Tools -> Widget Reflector找到Tab入口
+2. **简化ShutdownModule**：仅保留Tab注销逻辑，删除所有ToolMenus相关清理代码
+3. **保留核心WebBrowser功能**：不影响插件核心功能的使用
+
+### 长期解决方案
+1. 等待Epic官方稳定ToolMenus API规范后再进行完整适配
+2. 降级到UE 5.4 LTS稳定版本，规避API频繁变更问题

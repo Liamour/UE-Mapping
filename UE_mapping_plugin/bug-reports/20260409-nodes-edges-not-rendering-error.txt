@@ -1,0 +1,48 @@
+# 节点与连线未渲染问题分析报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 项目版本 | UE 5.7 |
+| 影响范围 | 蓝图资产扫描后React Flow画布无节点/连线渲染 |
+| 前置状态 | 编译无报错、点击扫描按钮后alert正常弹出，无报错日志 |
+
+---
+
+## 根因分析（按排查优先级排序）
+### 1. 后端C++层可能问题（概率最高）
+#### 1.1 AssetRegistry依赖API适配问题
+- UE 5.7`GetDependencies`方法可能存在重载变更，原代码未指定依赖类型参数，默认可能返回空数组
+- 可能需要添加第二个参数`EDependencyQuery::Runtime`才能正确获取资产依赖
+#### 1.2 FARFilter过滤逻辑问题
+- `UBlueprint::StaticClass()->GetClassPathName()`在UE 5.7可能返回错误的类路径，导致没有匹配不到任何蓝图资产
+- `/Game`路径过滤可能不包含插件目录内的蓝图资产，导致AssetDataList为空
+#### 1.3 依赖过滤逻辑过于严格
+- `ValidPackageNames`只包含蓝图资产，但很多依赖可能是其他类型资产（UClass/UObject等），全部被过滤导致edges数组为空
+- 蓝图资产的PackageName大小写/依赖的TargetPackage大小写不匹配导致过滤失效
+#### 1.4 JSON序列化异常
+- 序列化过程中出现异常，导致返回的JSON字符串被截断/格式错误，前端解析失败
+
+### 2. 前端层可能问题（概率次高）
+#### 2.1 Zustand状态更新未触发重渲染
+- `useGraphStore的setNodes/setEdges方法未正确实现immutable更新，React Flow未检测到状态变更导致未重渲染
+- React Flow组件未正确绑定nodes和edges状态变量
+#### 2.2 节点格式不兼容
+- 后端返回的node的`type: "system"`与前端SystemNode组件注册名称不匹配
+- 节点position字段格式错误，所有节点坐标重叠导致视觉上不可见
+#### 2.3 桥调用/数据问题
+- UE注入的方法名非预期，实际返回的JSON中nodes/edges字段缺失/为空
+- Web UI缓存了旧版本前端代码，未加载最新修改的逻辑
+
+---
+
+## 验证排查步骤
+### 第一步：验证后端返回数据
+1. 在UE中打开Web UI，按F12打开开发者工具
+2. 点击扫描按钮，查看控制台输出的`Raw JSON received from UE`的字符串内容，检查是否包含nodes和edges字段，以及数组长度
+3. 查看UE Output Log是否输出`[ARCHITECT] Scan Complete. Generated X nodes.`日志，X是否大于0
+### 第二步：验证过滤逻辑
+1. 如果X=0，说明FARFilter未匹配到任何资产，需要调整过滤器规则
+2. 如果X>0但edges数组为空，说明依赖获取逻辑有问题，需要调整GetDependencies调用参数
+### 第三步：验证前端状态更新
+1. 前端控制台输出`Parsed Nodes Count`和`Parsed Edges Count`数值大于0，说明数据已经正确接收，问题出在Zustand/React Flow渲染层
+2. 如果控制台输出数值为0，说明JSON解析失败/后端返回数据为空

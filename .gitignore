@@ -1,0 +1,30 @@
+# Unreal Engine generated files
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+Build/
+*.opensdf
+*.sdf
+*.suo
+*.user
+*.sln
+*.xcodeproj
+*.xcworkspace
+*.vcxproj
+*.vcxproj.filters
+.vs/
+.vscode/
+
+# Frontend generated files
+UE_mapping_plugin/node_modules/
+UE_mapping_plugin/dist/
+UE_mapping_plugin/.env
+UE_mapping_plugin/.env.local
+UE_mapping_plugin/.env.*.local
+
+# OS files
+Thumbs.db
+.DS_Store
+*.tmp
+*.log

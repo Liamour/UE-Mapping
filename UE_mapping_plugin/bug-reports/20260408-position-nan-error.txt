@@ -1,0 +1,92 @@
+# [BUG SUMMARY]
+React Flow position attribute NaN error causing React DOM validation warnings for x/y coordinates
+
+## [STACK TRACE / LOGS]
+```
+[error] Received NaN for the `%s` attribute. If this is expected, cast the value to a string. x
+[error] Received NaN for the `%s` attribute. If this is expected, cast the value to a string. y
+```
+
+## [ENVIRONMENT & STATE CONTEXT]
+- **OS:** Windows
+- **Vite Version:** 8.0.7
+- **React Flow Version:** 11.x
+- **React Version:** 18.x
+- **Project State:** TypeScript type import fixes completed, dev server running with forced cache reset
+
+## [CODE CONTEXT]
+**Affected Code:** GraphCanvas.tsx initial node definitions
+```typescript
+const initialNodes = [
+  {
+    id: 'sys-director',
+    type: 'system',
+    position: { x: 200, y: 250 }, // Valid numeric values
+    data: {
+      title: 'AI Director',
+      type: 'Blueprint',
+      description: 'Orchestrates all AI behaviors and procedural generation systems',
+      methods: ['StartGeneration', 'SetCameraFocus', 'UpdateDifficulty', 'SpawnEntity'],
+    } as NodeData,
+  },
+  // ... other nodes
+];
+```
+
+## [ROOT CAUSE HYPOTHESIS]
+1. **Node Position Initialization Race Condition:** React Flow initializes before nodes are fully hydrated in Zustand store, receiving undefined position values that become NaN
+2. **Mock Data Cleanup Required:** The mock 'AI Director' node violates project requirements stating no relation to AI Director functionality
+
+## [PROPOSED SOLUTIONS]
+### **Step 1: Remove AI Director References (Mandatory)**
+Update mock data in GraphCanvas.tsx to remove all AI Director related content:
+```typescript
+const initialNodes = [
+  {
+    id: 'sys-blueprint-core',
+    type: 'system',
+    position: { x: 200, y: 250 },
+    data: {
+      title: 'Blueprint Core System',
+      type: 'Blueprint',
+      description: 'Core blueprint runtime execution system',
+      methods: ['ExecuteScript', 'BindEvent', 'GetProperty', 'SetProperty'],
+    } as NodeData,
+  },
+  {
+    id: 'sys-camera',
+    type: 'system',
+    position: { x: 700, y: 250 },
+    data: {
+      title: 'Cine Camera Hub',
+      type: 'CPP',
+      description: 'Manages all cinematic cameras and dynamic shot sequencing',
+      methods: ['SwitchToCam', 'UpdateFOV', 'PlayCameraAnimation', 'AddCameraShake'],
+    } as NodeData,
+  },
+];
+```
+
+### **Step 2: Add Position Guardrails**
+Add type safety and default values for node positions in useGraphStore.ts:
+```typescript
+setInitialGraph: (nodes: Node<NodeData>[], edges: Edge[]) => set({ 
+  nodes: nodes.map(node => ({
+    ...node,
+    position: {
+      x: node.position?.x ?? 0,
+      y: node.position?.y ?? 0,
+    }
+  })), 
+  edges 
+}),
+```
+
+### **Step 3: Add React Flow Loading Guard**
+Wrap ReactFlow component in GraphCanvas.tsx with render guard:
+```typescript
+if (nodes.length === 0) return <div className="flex items-center justify-center h-full text-slate-400">Loading...</div>;
+```
+
+## Verification
+After applying fixes, clear cache and restart: `npm run dev -- --force`

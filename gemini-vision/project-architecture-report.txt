@@ -1,0 +1,116 @@
+# UE AICartographer Plugin Project Architecture Report
+Generated: 2026-04-12
+Engine Version: Unreal Engine 5.3/5.4
+
+## Overall Architecture
+Hybrid Editor Plugin with Dual-Layer Design:
+├─ [Layer 1] UE C++ Plugin (Plugins/AICartographer)
+└─ [Layer 2] React Web Frontend (ue_mapping_plugin)
+
+---
+
+## 1. UE Plugin Layer (AICartographer)
+Located at: D:\Amour\UEproject\Cropout\Plugins\AICartographer
+
+### Core Structure
+```
+AICartographer/
+├─ AICartographer.uplugin          # Plugin manifest
+├─ Config/FilterPlugin.ini         # Configuration
+├─ Resources/
+│  ├─ Icon128.png                  # Plugin icon
+│  └─ WebUI/                       # Built frontend distribution
+│     ├─ index.html
+│     └─ assets/ (bundled js/css)
+└─ Source/AICartographer/
+   ├─ AICartographer.Build.cs      # Build configuration
+   ├─ AICartographer.h/.cpp        # Plugin entry point
+   └─ Public/Private/
+      └─ AICartographerBridge.h/.cpp # UE <-> Frontend communication bridge
+```
+
+### Key Capabilities
+- Editor-only plugin (WITH_EDITOR scope only)
+- WebBrowser component integration for rendering React UI
+- JSON-RPC bridge for bidirectional communication between UE and frontend
+- AssetRegistry integration for project asset scanning
+- Slate UI framework integration for native editor experience
+
+---
+
+## 2. Web Frontend Layer (ue_mapping_plugin)
+Located at: D:\Amour\UEproject\Cropout\ue_mapping_plugin
+
+### Core Technology Stack
+- Build: Vite 8.x + TypeScript 5.x (strict mode)
+- UI: React 18.x + TailwindCSS 4 + PostCSS
+- Graph Engine: React Flow 11.x
+- State Management: Zustand
+- Testing: Vitest + React Testing Library
+
+### Core Structure
+```
+ue_mapping_plugin/
+├─ src/
+│  ├─ components/
+│  │  ├─ layout/Sidebar.tsx        # Left sidebar navigation
+│  │  └─ graph/
+│  │     ├─ GraphCanvas.tsx        # Main graph rendering surface
+│  │     └─ nodes/
+│  │        ├─ SystemNode.tsx      # Asset node component
+│  │        └─ ClusterGroupNode.tsx # Group cluster component
+│  ├─ store/useGraphStore.ts       # Centralized state management
+│  ├─ services/llmService.ts       # LLM/AI integration service
+│  ├─ types/                       # TypeScript type definitions
+│  ├─ utils/exportUtils.ts         # Data export utilities
+│  ├─ App.tsx                      # Root application component
+│  └─ main.tsx                     # Application entry point
+├─ public/                         # Static assets
+└─ Configuration files:
+   ├─ package.json, tsconfig.json
+   ├─ tailwind.config.js, postcss.config.js
+   └─ vite.config.ts
+```
+
+### Key Features
+- Interactive project topology graph visualization
+- AI-powered asset analysis and mapping
+- Real-time synchronization with UE editor state
+- Multiple export formats for mapping data
+- Strict type safety and error boundaries
+
+---
+
+## 3. Cross-Layer Communication Flow
+1. UE Editor ↔ C++ Bridge ↔ WebBrowser ↔ React Frontend
+2. Protocol: JSON-RPC over postMessage interface
+3. Data flow: Unidirectional state management (Zustand store single source of truth)
+
+---
+
+## 4. Critical Compliance Notes (per Project Rules)
+### UE C++ Layer
+- ✅ Editor-only API usage (no runtime pollution)
+- ✅ TSharedPtr/Slate smart pointer usage (no raw pointers)
+- ✅ Async AssetRegistry scanning (no blocking main thread)
+
+### Frontend Layer
+- ✅ Zustand centralized state management (no shared useState/Context)
+- ✅ React Flow virtual DOM rendering (no native DOM manipulation)
+- ✅ Async JSON parsing for large datasets (no render blocking)
+
+---
+
+## 5. Build & Deployment Pipeline
+1. Frontend: `npm run build` → outputs to `dist/` folder
+2. Manual copy: `dist/` contents → `Plugins/AICartographer/Resources/WebUI/`
+3. UE: Compile plugin + load into editor
+4. Access via editor menu: Window > Developer Tools > AICartographer
+
+---
+
+## 6. Known Issues (from bug-reports folder)
+1. 17 recorded bugs as of 2026-04-12
+2. Highest priority: UE 5.7 ToolMenus API compatibility issue
+3. Highest impact: CEF JSON export limit issue for large projects
+4. Performance: Large dataset rendering optimization required

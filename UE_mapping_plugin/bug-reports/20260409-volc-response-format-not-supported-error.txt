@@ -1,0 +1,31 @@
+# 火山引擎模型不支持JSON格式约束Bug报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| HTTP错误码 | 400 BadRequest |
+| 业务错误码 | InvalidParameter |
+| 错误描述 | The parameter `response_format.type` specified in the request are not valid: `json_object` is not supported by this model. |
+| 请求ID | 0217757643255562995bc0404cadc6b35f2fde43a3d6f9cf0ac76 |
+| 影响范围 | AI聚类请求完全失败，无法返回结构化JSON结果 |
+
+---
+
+## 根因分析
+### 1. 核心问题：模型兼容性不支持特性
+`response_format: { type: "json_object" }是较新的模型特性目前仅支持：
+- 该参数是OpenAI率先推出的强制返回JSON格式的特性，火山引擎仅部分新上线的大模型支持该参数
+- 当前配置的Endpoint ID对应的模型版本较旧/不属于支持该参数配置，参数校验直接失败
+### 2. 代码层面触发原因
+我们在`llmService.ts`的请求体中强制指定了`response_format: { type: "json_object" }`参数，要求服务端校验不支持该特性，返回400错误。
+### 3. 额外说明
+我们已经实现的Markdown标签净化逻辑（去除```json/```标签剥离），即使去掉`response_format`参数，只要系统prompt足够严格，大模型也会返回符合要求的JSON格式，净化逻辑可以正常解析，返回正确的净化逻辑过滤掉多余的格式标签。
+
+---
+
+## 修复方向建议
+### 方案一（兼容性最高，无需更换模型）：
+删除请求中的`response_format`参数，完全依赖system_prompt的强约束+前端的暴力净化逻辑，99%场景下可以正确解析返回结果，无需修改模型/升级模型成本。
+### 方案二（适配模型要求需要强制JSON返回：
+将Endpoint ID切换为火山引擎官方明确说明支持`response_format`参数的模型版本。
+### 方案三（升级现有模型）：
+升级当前Endpoint对应的模型版本到最新支持JSON格式约束的版本，无需修改代码即可恢复正常工作。

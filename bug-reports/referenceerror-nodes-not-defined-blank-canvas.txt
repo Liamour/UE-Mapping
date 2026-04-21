@@ -1,0 +1,57 @@
+BUG REPORT: ReferenceError: nodes is not defined 画布空白崩溃
+Date: 2026-04-12
+Affected Component: GraphCanvas.tsx
+Severity: Critical (完全阻断应用使用，页面全白无任何内容)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+错误现象：
+1. 打开应用后页面完全空白，无任何UI元素
+2. 控制台报错：`Uncaught ReferenceError: nodes is not defined`
+3. 错误发生在React组件渲染阶段，导致整个应用崩溃
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+变量重命名不完整导致引用错误：
+在重构GraphCanvas视图路由逻辑时，我们对Zustand状态解构进行了重命名，避免和缓存变量冲突：
+```typescript
+// 修改前
+const { nodes, edges, ... } = useGraphStore();
+// 修改后
+const { nodes: storeNodes, edges: storeEdges, ... } = useGraphStore();
+```
+但是代码中后续的**空状态判断逻辑没有同步更新变量名**，仍然在引用已经被重命名的`nodes`变量，导致运行时变量未定义，React组件渲染失败，页面全白：
+```typescript
+// 错误代码位置：GraphCanvas.tsx 约第100行
+if (!nodes || nodes.length === 0) { // ❌ nodes变量已经不存在，重命名为storeNodes
+  return (
+    <div className="flex items-center justify-center w-full h-full text-slate-500 bg-slate-900 flex-col">
+      <span className="text-xl font-bold mb-4">Awaiting Architecture Scan</span>
+      <span className="text-sm">Click "扫描项目蓝图资产" to extract engine data.</span>
+    </div>
+  );
+}
+```
+==============================================================================
+IMPACT SCOPE
+==============================================================================
+1. 整个应用完全无法使用，任何视图都不显示
+2. 所有功能完全不可用，包括全局扫描、蓝图钻取、侧边栏等
+==============================================================================
+FIX SOLUTION (无需修改代码，仅说明修复方案)
+==============================================================================
+1行代码修复，只需要同步空状态判断的变量名即可：
+```typescript
+// 修复前
+if (!nodes || nodes.length === 0) {
+// 修复后
+if (!storeNodes || storeNodes.length === 0) {
+```
+==============================================================================
+VERIFICATION CRITERIA AFTER FIX
+==============================================================================
+1. 编译零错误，构建成功
+2. 页面正常加载，空状态正确显示「Awaiting Architecture Scan」提示
+3. 点击全局扫描，55个蓝图节点正常显示
+4. 蓝图钻取、面包屑返回功能完全正常
+5. 所有原有功能无回归问题

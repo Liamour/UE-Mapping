@@ -1,0 +1,111 @@
+# UE Project Plugin Code Structure Report
+
+## 1. UE_mapping_plugin Directory Status
+> Scanned root directory `d:\Amour\UE project\Cropout`
+> **RESULT**: No `UE_mapping_plugin` folder found in project root.
+
+## 2. AICartographer Plugin Analysis
+### 2.1 Directory Structure
+```
+Plugins/AICartographer/
+├── AICartographer.uplugin          # Plugin manifest file
+├── Resources/
+│   └── Icon128.png                 # Plugin icon
+└── Source/
+    └── AICartographer/
+        ├── AICartographer.Build.cs # Build configuration
+        ├── AICartographer.h        # Module header
+        └── AICartographer.cpp      # Module implementation
+```
+
+### 2.2 Core File Details
+#### 2.2.1 AICartographer.uplugin
+```json
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "AICartographer",
+	"Description": "",
+	"Category": "Other",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false
+}
+```
+**Analysis**: Standard UE5 plugin manifest, version 1.0, supports content files.
+
+#### 2.2.2 AICartographer.Build.cs
+```csharp
+using UnrealBuildTool;
+public class AICartographer : ModuleRules
+{
+    public AICartographer(ReadOnlyTargetRules Target) : base(Target)
+    {
+        PCHUsage = ModuleRules.PCHUsageMode.UseExplicitOrSharedPCHs;
+        PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore" });
+        PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore", "WebBrowser", "WorkspaceMenuStructure" });
+    }
+}
+```
+**Analysis**: Build configuration includes all required dependencies for Slate UI and WebBrowser widget functionality.
+
+#### 2.2.3 AICartographer.h
+```cpp
+#pragma once
+#include "CoreMinimal.h"
+#include "Modules/ModuleManager.h"
+class FAICartographerModule : public IModuleInterface
+{
+public:
+    virtual void StartupModule() override;
+    virtual void ShutdownModule() override;
+    TSharedRef<class SDockTab> OnSpawnPluginTab(const class FSpawnTabArgs& SpawnTabArgs);
+};
+```
+**Analysis**: Module interface declaration, implements standard UE module lifecycle methods and tab spawn handler.
+
+#### 2.2.4 AICartographer.cpp
+```cpp
+#include "AICartographer.h"
+#include "Widgets/Docking/SDockTab.h"
+#include "SWebBrowser.h"
+#include "WorkspaceMenuStructure.h"
+#include "WorkspaceMenuStructureModule.h"
+
+static const FName AICartographerTabName("AICartographer");
+
+void FAICartographerModule::StartupModule()
+{
+    FGlobalTabmanager::Get()->RegisterNomadTabSpawner(AICartographerTabName, FOnSpawnTab::CreateRaw(this, &FAICartographerModule::OnSpawnPluginTab))
+        .SetDisplayName(FText::FromString(TEXT("AICartographer Web UI")))
+        .SetMenuType(ETabSpawnerMenuType::Enabled);
+}
+
+void FAICartographerModule::ShutdownModule()
+{
+    FGlobalTabmanager::Get()->UnregisterNomadTabSpawner(AICartographerTabName);
+}
+
+TSharedRef<SDockTab> FAICartographerModule::OnSpawnPluginTab(const FSpawnTabArgs& SpawnTabArgs)
+{
+    return SNew(SDockTab)
+        .TabRole(ETabRole::NomadTab)
+        [
+            SNew(SWebBrowser)
+            .InitialURL("http://localhost:5173/")
+            .ShowControls(false)
+            .SupportsTransparency(true)
+        ];
+}
+
+IMPLEMENT_MODULE(FAICartographerModule, AICartographer)
+```
+**Analysis**: Complete implementation of NomadTab registration. On startup, registers a dockable tab that embeds SWebBrowser pointing to local React dev server (port 5173). Properly unregisters the tab on module shutdown.
+
+## 3. Summary
+- UE_mapping_plugin folder does not exist in project root
+- AICartographer plugin is fully functional with Web UI integration capability
+- Plugin follows UE5 standard module architecture and Slate UI best practices
+- Ready for asset harvesting system development (Phase 4)

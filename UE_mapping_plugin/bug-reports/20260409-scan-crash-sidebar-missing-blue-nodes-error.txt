@@ -1,0 +1,56 @@
+# 点击扫描后侧栏消失/页面全蓝/节点样式异常问题分析报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 现象 | 点击扫描按钮后，侧边栏消失，页面变成全深蓝色背景，或节点显示为统一蓝色无样式 |
+| 前置状态 | 后端返回55个节点数据正常，前端控制台无网络错误，编译正常 |
+
+---
+
+## 根因分析（按优先级排序）
+### 1. 最高概率：节点数据结构不匹配导致组件渲染崩溃（80%）
+**核心问题：前后端字段定义不一致**
+- 前端`SystemNode`组件预期的节点`data`结构：
+  ```ts
+  {
+    title: string,    // 节点显示标题
+    type: 'CPP' | 'Blueprint', // 节点类型，控制样式
+    description: string, // 节点描述
+    methods: string[] // 方法列表
+  }
+  ```
+- 后端C++当前返回的节点`data`结构：
+  ```cpp
+  DataObj->SetStringField(TEXT("label"), Asset.AssetName.ToString());
+  // 仅返回label字段，无title/type/description/methods等必填字段
+  ```
+- `SystemNode`组件引用`data.title`、`data.type`等不存在的字段，抛出`undefined`异常，导致整个React组件树崩溃，最终页面仅残留ReactFlow的深蓝色背景
+- 组件崩溃导致全局布局失效，侧边栏随之消失
+
+### 2. 次高概率：GraphCanvas全屏样式挤压侧边栏（15%）
+- 我们为GraphCanvas外层添加了`height: 100vh`和`width: 100%`的强制全屏样式
+- 如果根布局为横向flex排列（GraphCanvas + Sidebar），100%宽度的GraphCanvas会占满整个父容器，将侧边栏挤出可视区域
+- 叠加组件崩溃问题，最终呈现全屏深蓝色背景，无任何可见元素
+
+### 3. 低概率：样式匹配失败导致节点显示为默认蓝色（5%）
+- 若组件未完全崩溃，因返回的节点缺少`data.type`字段，无法匹配`typeIcons`和`typeColors`中定义的样式规则，所有节点显示为默认蓝色，无图标和颜色区分
+
+---
+
+## 验证排查步骤
+### 第一步：检查渲染异常日志
+1. 打开Web UI开发者工具的Console标签，点击扫描按钮
+2. 观察是否有`Cannot read property 'title' of undefined`或类似的组件渲染错误日志，有则确认是数据结构不匹配问题
+
+### 第二步：验证返回节点结构
+1. 在Sidebar.tsx的扫描逻辑中添加日志：`console.log("Sample node data:", parsedData.nodes[0])`
+2. 检查输出的节点`data`字段是否只有`label`，缺少`title`、`type`等必要字段
+
+### 第三步：排查布局挤压问题
+1. 临时注释GraphCanvas外层的`style={{ width: '100%', height: '100vh' }}`样式
+2. 刷新页面后查看侧边栏是否恢复显示
+3. 检查根布局的flex分配，确认GraphCanvas应使用`flex-1`而非固定100%宽度占满容器
+
+### 第四步：验证样式匹配问题
+1. 若节点可显示但统一为蓝色，检查每个节点的`data.type`字段是否存在且为预期枚举值
+2. 检查SystemNode组件是否添加了空值保护，处理`type`字段缺失的异常情况

@@ -1,0 +1,44 @@
+# BUG SUMMARY
+Uncaught SyntaxError: The requested module '/src/components/graph/nodes/SystemNode.tsx' does not provide an export named 'SystemNode'
+
+## STACK TRACE / LOGS
+Error Location: GraphCanvas.tsx:12:10
+Impact: Entire application renders blank white page, fully unresponsive
+
+## ENVIRONMENT & STATE CONTEXT
+- Project: UE_mapping_plugin (Phase 6.1 TE Industrial Aesthetic Refactor)
+- Last Modification: SystemNode.tsx was fully rewritten during feature implementation
+- Browser: ES Module import system failure
+- React/ReactFlow: Standard ESM-based frontend stack
+
+## CODE CONTEXT
+### Failing Import (GraphCanvas.tsx line 12):
+```typescript
+import { SystemNode } from './nodes/SystemNode';
+```
+
+### Current SystemNode.tsx Export:
+```typescript
+export default memo(SystemNode);
+```
+
+## ROOT CAUSE HYPOTHESIS
+**ESM import/export mismatch:
+- `SystemNode.tsx` uses **default export** pattern
+- `GraphCanvas.tsx` attempts **named import** (`{ SystemNode }`)
+- This syntax mismatch breaks module resolution, causing application crash
+
+## PROPOSED SOLUTIONS
+### Solution 1 (Modify GraphCanvas Import (Recommended):
+```typescript
+// Change from named import to default import
+import SystemNode from './nodes/SystemNode';
+```
+
+### Solution 2 (Modify SystemNode Export):
+```typescript
+// Change from default export to named export
+export const SystemNode = memo((): React.FC = () => { ... });
+```
+
+Both solutions resolve the ESM mismatch, with Solution 1 being minimal change with zero side effects to existing node registration code.

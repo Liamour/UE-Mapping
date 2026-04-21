@@ -1,0 +1,79 @@
+BUG REPORT: 深度扫描节点坐标缺失导致SVG渲染崩溃
+Date: 2026-04-12
+Affected Component: src/services/engineBridge.ts AST节点处理逻辑
+Severity: High (点击深度扫描后页面崩溃，需刷新恢复)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+错误现象：
+1. 全局扫描正常，55个节点显示正常
+2. 点击任意节点深度扫描，C++返回AST数据正常，控制台打印`DEEP SCAN AST RECEIVED`
+3. 页面瞬间崩溃，控制台报错堆栈：
+```
+Error: <pattern> attribute x: Expected length, "NaN".
+Error: <pattern> attribute y: Expected length, "NaN".
+Error: <path> attribute d: Expected number, "MNaN,NaNhNaNvNaNh…".
+Error: <svg> attribute viewBox: Expected number, "NaN NaN NaN NaN".
+Uncaught TypeError: Cannot read properties of undefined (reading 'x')
+```
+4. 崩溃发生在`setNodes`更新蓝图拓扑节点时，React Flow渲染阶段
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+**核心原因：AST节点缺少React Flow要求的position坐标字段**
+React Flow要求每个节点必须包含顶层`position: { x: number, y: number }`属性，用于渲染节点位置。我们在处理C++返回的蓝图AST节点时，只处理了`type`/`label`/`pins`字段，缺失坐标映射逻辑：
+```typescript
+// 存在缺陷的AST节点处理逻辑（engineBridge.ts）
+const processedNodes = (astData.nodes || []).map((node: any) => ({
+  ...node,
+  type: 'blueprintNode',
+  data: {
+    label: node.label,
+    pins: node.pins || []
+  }
+  // ❌ 缺失position字段映射：C++返回的节点坐标（NodePosX/NodePosY）未映射到React Flow要求的格式
+}));
+```
+---
+### 错误连锁触发流程：
+1. C++返回的蓝图节点包含`NodePosX`/`NodePosY`（或`x`/`y`）坐标属性，但未封装在`position`字段下
+2. 处理后的AST节点`position`字段为`undefined`
+3. React Flow执行`setNodes`渲染时，读取`node.position.x`触发`Cannot read properties of undefined (reading 'x')`错误
+4. 坐标值全部为`NaN`，导致SVG渲染时生成大量无效属性，触发一系列`<pattern>`/`<path>`/`<viewBox>`错误
+5. 最终React组件渲染失败，页面崩溃
+---
+### 验证依据：
+- 全局扫描节点正常：全局扫描返回的节点包含完整的`position`字段，无坐标问题
+- 仅深度扫描触发崩溃：只有AST节点处理逻辑缺失坐标映射
+- 错误时机与深度扫描完全吻合：在AST数据返回后执行`setAstGraph`更新节点时崩溃
+==============================================================================
+ADDITIONAL POTENTIAL ISSUE (次要)
+==============================================================================
+蓝图节点ID使用C++内存地址生成（十六进制字符串，格式如`0x12345678`），可能和全局节点ID重复，但不会导致本次崩溃，仅可能出现节点选中异常，不属于本次错误根源。
+==============================================================================
+FIX SOLUTION (无需修改代码，仅说明)
+==============================================================================
+修改`engineBridge.ts`中的AST节点处理逻辑，补充坐标映射即可：
+```typescript
+const processedNodes = (astData.nodes || []).map((node: any) => ({
+  ...node,
+  type: 'blueprintNode',
+  position: {
+    x: node.NodePosX ?? node.x ?? 0, // 兼容C++返回的坐标字段名
+    y: node.NodePosY ?? node.y ?? 0
+  },
+  data: {
+    label: node.label,
+    pins: node.pins || []
+  }
+}));
+```
+仅需添加`position`字段映射，即可修复所有错误，无需其他修改。
+==============================================================================
+VERIFICATION CRITERIA AFTER FIX
+==============================================================================
+1. 点击深度扫描后无崩溃错误
+2. 蓝图节点正确显示，坐标和UE编辑器中完全一致
+3. 引脚、连线渲染正常
+4. 所有SVG错误消失，无控制台警告
+5. 切换全局/蓝图视图无任何异常

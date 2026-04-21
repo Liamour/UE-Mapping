@@ -1,0 +1,37 @@
+# AI分析成功但UI无变化问题分析报告
+## 基本信息
+| 项 | 详情 |
+|----|------|
+| 现象 | 点击Volcengine AI调用成功，token正常消耗，后端扫描生成55个节点，但UI界面无明显变化 |
+| 前置状态 | 0xC0000005崩溃已修复，扫描逻辑正常运行，LLM API返回成功 |
+
+---
+
+## 根因分析（按场景区分）
+### 场景1：点击「扫描项目蓝图资产」后UI无55个节点展示（1%概率）
+核心原因：Zustand状态更新未触发React重渲染
+1. 未正确实现setNodes方法：`useGraphStore`中setNodes方法如果是直接修改state（如`state.nodes = newNodes`）而非返回新的状态对象，React无法检测到状态变更，UI不重渲染
+2. 节点坐标重叠：所有节点的position坐标计算错误，全部重叠在同一个位置，视觉上看起来没有变化
+3. 渲染拦截逻辑问题：GraphCanvas组件的空状态拦截逻辑触发，未进入正常渲染分支
+### 场景2：点击「Execute Volcengine AI」后UI无聚类结果展示（99%概率）
+核心原因：Phase 5.2 可视化逻辑未实现，当前仅为演示阶段
+1. 代码中明确标注TODO：`// TODO in Phase 5.2: Apply clusters to React Flow nodes`，当前AI分析仅做了API调用和console.log打印，未将聚类结果写入Zustand状态，也没有对应的高亮、分组、着色等可视化逻辑
+2. 当前AI分析的完整逻辑仅返回JSON结果输出到浏览器控制台，未做任何UI变更，因此看起来没有变化
+3. 前端仅弹窗提示「AI Analysis Complete!」是当前版本的唯一UI反馈，其他效果未实现
+---
+
+## 验证排查步骤
+### 第一步：验证扫描节点渲染是否正常
+1. 打开Web UI的F12开发者工具 → Network面板，扫描后查看NetWork面板有没有请求？不，看Console：
+2. 点击扫描按钮后，查看Console是否打印`Parsed Nodes Count: 55`
+3. 在Console输入`useGraphStore.getState().nodes.length`，确认返回55说明数据已经在store中，只是没有渲染出来，大概率是坐标重叠问题；如果返回0说明setNodes方法没正确更新。
+### 第二步：验证AI分析结果
+1. 点击AI分析按钮后，查看Console是否打印`AI Architect Result:`和对应的clusters数组
+2. 如果有结果说明API调用完全正常，UI无变化是预期行为，因为Phase5.2可视化逻辑尚未实现
+---
+
+## 结论说明
+当前版本的Volcengine AI功能仅为演示阶段：
+1. LLM调用链路已完全打通，token消耗正常，分析结果已返回前端
+2. 分析结果仅输出到浏览器Console，没有做可视化渲染，因此UI无明显变化是正常行为
+3. 后续Phase5.2版本会实现：自动将节点按子系统分组高亮、不同子系统不同颜色标记、自动布局等可视化效果。

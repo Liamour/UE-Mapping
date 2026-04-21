@@ -1,0 +1,11 @@
+# Ignore all Intermediate and Saved directories
+*/Intermediate/*
+*/Saved/*
+*/Script/*
+*/DerivedDataCache/*
+*/Binaries/*
+*/Build/*
+
+*/obj/*
+*/fbx/*
+*/psd/*

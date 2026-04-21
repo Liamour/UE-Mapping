@@ -1,0 +1,54 @@
+BUG REPORT: Deep Scan Implementation Issues
+Date: 2026-04-12
+Affected Component: Cognitive Loop UI Layer
+Status: Critical Blocking
+
+==============================================================================
+ISSUE 1: FUNCTION TRIGGER LOCATION VIOLATES DESIGN SPECIFICATION
+==============================================================================
+Description: 
+Deep scan trigger logic is incorrectly bound to the VIEW DETAILS interactive area of SystemNode component, which violates the requirement that deep scan should be triggered by a dedicated "Deep Scan" button located in the sidebar Node Inspector panel.
+
+Code Location:
+File: src/components/graph/nodes/SystemNode.tsx
+Lines: 103-106, onClick event handler of the bottom groove area
+
+Root Cause:
+Trigger point binding position is wrong. The VIEW DETAILS area is designed for opening detail panels, not for triggering heavy scanning operations. This breaks the UI interaction hierarchy design specification.
+
+Impact:
+- Interaction logic mismatch with product design
+- User expectation confusion
+- Violation of established UX patterns
+
+==============================================================================
+ISSUE 2: VIEW DETAILS CLICK HAS NO RESPONSE AT ALL
+==============================================================================
+Description:
+Clicking the VIEW DETAILS area produces no console logs, no scan trigger, no node state update, and no visible feedback of any kind.
+
+Code Analysis & Root Causes:
+1. Missing Parameter Field:
+   Line 105: requestDeepScan(id, data.assetPath)
+   The `assetPath` field does not exist in the current Node Data structure returned by C++ backend. Only the `description` field stores the asset path, leading to undefined parameter passing and broken execution.
+
+2. Global Callback Conflict:
+   File: src/services/engineBridge.ts Line 20
+   Duplicate definition of `window.receiveDeepScan` overrides the same callback already defined in src/App.tsx Line 9, leading to callback logic conflict and failed state update.
+
+3. UE Bridge Function Name Case Mismatch:
+   File: src/services/engineBridge.ts Line 10
+   Calls `window.ue.aicartographerbridge.requestdeepscan` (all lowercase), which does not match the C++ UFUNCTION name `RequestDeepScan` (camel case), leading to complete failure of bridge calls in production environment.
+
+Impact:
+- Deep scan functionality is completely unusable
+- No user feedback on interaction
+- Entire cognitive loop pipeline is broken
+
+==============================================================================
+VERIFICATION CRITERIA FOR FIX
+==============================================================================
+1. Deep Scan button is implemented and rendered in sidebar Node Inspector panel
+2. VIEW DETAILS area restores its original detail display function
+3. Clicking Deep Scan button triggers complete pipeline: C++ scan -> LLM analysis -> node state update
+4. Both production UE environment and local dev mock mode work correctly

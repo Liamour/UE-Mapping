@@ -1,0 +1,75 @@
+BUG REPORT: Intel GPU MONZA Renderer CEF Process Crash
+Date: 2026-04-12
+Affected Component: WebBrowser CEF Context Binding Timing
+Severity: Critical (causes Unreal Editor immediate crash when opening plugin tab)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+Crash signature:
+```
+Exception thrown at 0x00007FFB654273FA in UnrealEditor.exe: Microsoft C++ exception: MONZA::DdiThreadingContext<MONZA::AdapterTraits_Gen12LP>::msg_end at memory location 0x0000005605BFFDD0.
+```
+This is **NOT a crash in our C++ business logic code**. `MONZA` is the internal codename for Intel Gen12/Iris Xe integrated GPU driver components. This crash originates from the Chromium Embedded Framework (CEF) GPU render process of the UE `SWebBrowser` widget, propagating up from the Intel GPU driver layer.
+==============================================================================
+ROOT CAUSE ANALYSIS
+==============================================================================
+### Primary Root Cause: Incorrect `BindUObject` Timing (100% Trigger)
+CEF browser context initialization is **asynchronous** and completes only after the browser widget has been fully created, attached to the Slate window, and the initial page has begun loading. We are now calling `WebBrowserWidget->BindUObject()` **synchronously immediately after widget creation**, before the CEF context has been initialized.
+
+This triggers undefined behavior in CEF's V8 binding layer, which propagates to the GPU render process, causing the Intel driver crash we are observing. The earlier implementation of calling `BindUObject()` inside the `OnLoadCompleted` callback had the **correct timing** (context is fully initialized by then) and did not trigger this crash.
+### Secondary Context: API Behavior Confirmation
+UE's `SWebBrowser::BindUObject()` API does **not** have internal guards against early calls. It directly forwards the binding request to the underlying CEF V8 context, which does not exist at the time we are calling it, leading to memory corruption in the CEF render process, which crashes the GPU driver thread.
+The MONZA exception is a **symptom** of this CEF render process crash, not the root cause itself.
+==============================================================================
+BUG FIX SOLUTIONS (No code modifications applied per requirements)
+==============================================================================
+### Solution: Restore Timing-Correct Binding via Constructor OnLoadCompleted Parameter
+Use the only officially supported timing for CEF binding by restoring the `OnLoadCompleted` constructor parameter (the only valid public API for this callback) and moving the `BindUObject` call back inside it:
+```cpp
+SAssignNew(WebBrowserWidget, SWebBrowser)
+    .InitialURL(InitialURL)
+    .ShowControls(false)
+    .SupportsTransparency(true)
+    // ONLY valid way to get CEF context ready notification
+    .OnLoadCompleted(FSimpleDelegate::CreateLambda([this, WebBrowserWidget]()
+    {
+        if (WebBrowserWidget.IsValid() && RPCBridge.IsValid())
+        {
+            WebBrowserWidget->BindUObject(TEXT("aicartographerbridge"), RPCBridge.Get(), true);
+            UE_LOG(LogTemp, Warning, TEXT("[AICARTOGRAPHER_ARCHITECT] RPC Bridge Bound to CEF Context Successfully."));
+        }
+    }));
+
+// KEEP the delegate binding outside as-is, it is 100% safe and correct
+if (WebBrowserWidget.IsValid() && RPCBridge.IsValid())
+{
+    RPCBridge->OnDeepScanResult.BindLambda([WeakBrowserPtr = WebBrowserWidget.ToWeakPtr()](const FString& NodeId, const FString& ASTJson)
+    {
+        if (TSharedPtr<SWebBrowser> BrowserPtr = WeakBrowserPtr.Pin())
+        {
+            FString JSCommand = FString::Printf(TEXT("window.receiveDeepScan(\"%s\", %s)"), *NodeId, *ASTJson);
+            BrowserPtr->ExecuteJavascript(JSCommand);
+        }
+    });
+    UE_LOG(LogTemp, Warning, TEXT("[AICARTOGRAPHER_ARCHITECT] Delegate Bound Synchronously."));
+}
+```
+#### Architecture Compliance Points:
+✅ **No nested lambda scope issues**: Delegate binding remains flat/synchronous outside the callback
+✅ **Timing correct**: BindUObject executes only after CEF context is fully initialized
+✅ **All lifecycle safety preserved**: Weak pointer capture for delegate, WebBrowserWidget value capture for callback
+✅ **100% UE API compliant**: Uses only public Slate constructor parameter API, no invalid setter calls
+✅ **Zero architecture regression**: All our delegate/lifecycle safety improvements are fully retained
+==============================================================================
+TEMPORARY WORKAROUND
+==============================================================================
+1. Test on a system with NVIDIA/AMD discrete GPU (avoids Intel driver MONZA exception)
+2. Revert to earlier implementation with BindUObject inside OnLoadCompleted callback, which was confirmed working without crashes
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. Plugin tab opens without immediate Editor crash
+2. Console logs both "Delegate Bound Synchronously" and "RPC Bridge Bound to CEF Context Successfully." messages
+3. Clicking "Initialize Deep Scan" executes full pipeline correctly with no crashes
+4. Multiple tab open/close cycles work without memory leaks or crashes
+5. Full functionality preserved: Blueprint scanning, AST extraction, LLM analysis, UI state update

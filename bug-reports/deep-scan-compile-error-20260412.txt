@@ -1,0 +1,54 @@
+BUG REPORT: AICartographer Plugin Compilation Error (Code 6)
+Date: 2026-04-12
+Affected Version: UE 5.7
+Component: Deep Scan & AST Purification Pipeline
+
+==============================================================================
+ERROR DETAILS
+==============================================================================
+1. Primary Error: 'UK2Node_CustomEvent': undeclared identifier
+   File: Plugins/AICartographer/Source/AICartographer/Private/AICartographerBridge.cpp
+   Location: PurifyNodeToAST function, custom event type check line
+
+2. Secondary Error: 'Cast': no matching overloaded function found
+   File: Plugins/AICartographer/Source/AICartographer/Private/AICartographerBridge.cpp
+   Location: Same line as above, derived from primary error
+
+==============================================================================
+CODE ANALYSIS
+==============================================================================
+Problematic Code Snippet:
+```cpp
+else if (Cast<UK2Node_CustomEvent>(Node))
+{
+    bIsHighValueNode = true;
+    JsonObj->SetStringField(TEXT("Type"), TEXT("CustomEvent"));
+    JsonObj->SetStringField(TEXT("Target"), Node->GetName());
+}
+```
+
+Current Header Dependencies (Incomplete):
+#include "EdGraph/EdGraphNode.h"
+#include "K2Node_CallFunction.h"
+#include "K2Node_Event.h"
+[MISSING] #include "K2Node_CustomEvent.h"
+
+Root Cause Analysis:
+1. The code references UK2Node_CustomEvent type but does not include its corresponding header file declaration
+2. Unreal Engine's Cast<T>() template function requires a fully declared type to resolve overloads
+3. Undeclared UK2Node_CustomEvent type prevents the compiler from matching the correct Cast overload, causing both errors
+
+==============================================================================
+IMPACT ASSESSMENT
+==============================================================================
+- Critical: Entire AICartographer plugin compilation fails
+- Deep scan functionality is completely non-functional
+- No runtime impact as code cannot be compiled to binary
+
+==============================================================================
+RESOLUTION GUIDANCE
+==============================================================================
+Fix Steps (No code modifications implemented per requirements):
+1. Add #include "K2Node_CustomEvent.h" to the header import section of AICartographerBridge.cpp
+2. Re-run Unreal Engine build process
+3. Both compilation errors will be resolved simultaneously

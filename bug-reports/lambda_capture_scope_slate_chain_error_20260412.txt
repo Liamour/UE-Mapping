@@ -1,0 +1,71 @@
+BUG REPORT: Slate Builder Chain Lambda Capture Scope Compilation Error
+Date: 2026-04-12
+Affected Component: AICartographer Module SWebBrowser Initialization
+Severity: Critical (blocks UE compilation)
+==============================================================================
+ERROR ANALYSIS
+==============================================================================
+Build exit code 6 with error:
+```
+'FAICartographerModule::WebBrowserWidget': a lambda capture must be a variable from an enclosing function scope
+```
+Location: `AICartographer.cpp` SAssignNew builder chain, `.OnLoadCompleted()` parameter lambda capture list.
+==============================================================================
+ROOT CAUSE DEEP DIVE
+==============================================================================
+### 1. Primary Compilation Error Root Cause
+The error is triggered by **illegal lambda capture timing within the Slate builder chain**:
+- `WebBrowserWidget` is a **local stack variable defined inside the `OnSpawnPluginTab` function** - it is NOT a member variable of the `FAICartographerModule` class
+- We are trying to capture `WebBrowserWidget` inside the lambda passed to `.OnLoadCompleted()` **while the `SAssignNew` call is still executing and the `WebBrowserWidget` variable has not been fully initialized yet**
+- The UE Slate template builder chain delays the parsing of lambda parameters, and at the time the compiler resolves the capture list, the local `WebBrowserWidget` symbol has not been registered to the function scope yet
+- The compiler falls back to searching for `WebBrowserWidget` in the class scope, cannot find it, and throws the error that we are trying to capture a non-existent class member
+### 2. Hidden Runtime Risk If Compiled
+Even if the compiler could be forced to accept this code, it would crash at runtime:
+- Capturing an uninitialized `TSharedPtr` during its assignment leads to invalid reference counting state
+- The shared pointer's internal reference count would be corrupted, leading to premature deallocation of the WebBrowserWidget, or memory leaks
+==============================================================================
+ADDITIONAL POTENTIAL CODE ISSUES
+==============================================================================
+### 1. CEF Binding Loss on Page Refresh
+The current implementation binds the UObject only once on initial page load. If the user refreshes the browser page (via console or JS reload), the V8 context is destroyed and recreated, and the binding will be lost permanently with no way to restore it.
+### 2. Race Condition on Early JS Calls
+If the frontend code calls `aicartographerbridge.requestDeepScan()` immediately on page load before the `BindUObject` call completes, the call will fail with a `undefined` error in JS.
+### 3. No Error Handling for Binding Failures
+There is no validation or error logging for the `BindUObject` call, so if binding fails for any reason (CEF context invalid, etc.), we will have no visibility into the failure.
+==============================================================================
+BUG FIX SOLUTIONS (No code modifications applied per requirements)
+==============================================================================
+### Solution 1: Move Lambda Out of Builder Chain (Recommended, 0 architecture changes)
+Separate the OnLoadCompleted binding from the SAssignNew chain, after the WebBrowserWidget variable is fully initialized:
+```cpp
+// First instantiate widget fully
+SAssignNew(WebBrowserWidget, SWebBrowser)
+    .InitialURL(InitialURL)
+    .ShowControls(false)
+    .SupportsTransparency(true);
+// Now bind callback AFTER variable is initialized - capture works correctly
+WebBrowserWidget->SetOnLoadCompleted(FSimpleDelegate::CreateLambda([this, WebBrowserWidget]() 
+{
+    if (WebBrowserWidget.IsValid() && RPCBridge.IsValid()) 
+    {
+        WebBrowserWidget->BindUObject(TEXT("aicartographerbridge"), RPCBridge.Get(), true);
+        UE_LOG(LogTemp, Warning, TEXT("[AICARTOGRAPHER_ARCHITECT] RPC Bridge Bound to CEF Context Successfully."));
+    }
+}));
+```
+✅ No architectural changes required, fixes compilation error immediately
+✅ Maintains all existing timing/safety logic
+### Solution 2: Make WebBrowserWidget a Class Member (Alternative)
+Declare `TSharedPtr<SWebBrowser> WebBrowserWidget` as a member variable of `FAICartographerModule` class. The lambda will correctly capture the class member with no scope issues.
+### Optional Enhancements for Production Robustness
+1. Add page reload handling: listen to additional load events to re-bind the UObject after page refreshes
+2. Add JS side bridge presence check: add a small JS snippet to poll for the bridge presence before allowing deep scan operations
+3. Add error handling and logging for the BindUObject call to track binding failures
+==============================================================================
+VERIFICATION CRITERIA
+==============================================================================
+1. UE compiles with 0 errors
+2. Plugin tab opens without crashes
+3. Both delegate binding and CEF context binding logs appear in console
+4. Deep scan functionality works end-to-end
+5. Multiple tab open/close cycles and page reloads work without loss of functionality
