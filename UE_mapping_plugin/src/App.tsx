@@ -1,18 +1,9 @@
-import { ReactFlowProvider } from 'reactflow';
-import { GraphCanvas } from './components/graph/GraphCanvas';
-import { Sidebar } from './components/layout/Sidebar';
-import './App.css';
+import { AppShell } from './components/shell/AppShell';
+import './theme/tokens.css';
+import './theme/components.css';
 
 function App() {
-
-  return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-950">
-      <ReactFlowProvider>
-        <GraphCanvas />
-      </ReactFlowProvider>
-      <Sidebar />
-    </div>
-  );
+  return <AppShell />;
 }
 
 export default App;

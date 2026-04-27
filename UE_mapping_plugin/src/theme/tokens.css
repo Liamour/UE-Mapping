@@ -1,0 +1,66 @@
+/* Obsidian-style light theme tokens. Extend via :root[data-theme="dark"] later. */
+:root {
+  /* surfaces */
+  --bg-primary: #fafaf7;        /* main canvas */
+  --bg-secondary: #f3f1eb;      /* side panes */
+  --bg-tertiary: #e9e6dc;       /* hover/active rows */
+  --bg-elevated: #ffffff;       /* cards, modals */
+  --bg-code: #f4f1e8;
+
+  /* borders */
+  --border-subtle: #e2dfd4;
+  --border-default: #d2cdbe;
+  --border-strong: #a39f8e;
+
+  /* text */
+  --text-primary: #2a2a26;
+  --text-secondary: #5d5b52;
+  --text-muted: #8a8779;
+  --text-link: #6f6048;
+  --text-link-hover: #8a7556;
+
+  /* semantic — kept restrained, Obsidian-ish */
+  --accent: #b08968;            /* warm tan, replaces cyberpunk indigo */
+  --accent-hover: #9a7553;
+  --accent-soft: #f0e6d6;
+
+  --tag-system: #6c8a4a;
+  --tag-layer: #4a6c8a;
+  --tag-role: #8a6c4a;
+
+  --node-blueprint: #6f6048;
+  --node-cpp: #4a6c8a;
+  --node-interface: #8a4a6c;
+  --node-component: #8a6c4a;
+
+  --risk-nominal: #6f8a6c;
+  --risk-elevated: #c08a4a;
+  --risk-high: #b04a4a;
+
+  /* layout */
+  --pane-left: 260px;
+  --pane-right: 340px;
+  --topbar-h: 44px;
+  --tabbar-h: 36px;
+  --breadcrumb-h: 32px;
+
+  /* type */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  --font-serif: 'Lora', Georgia, serif;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 18px;
+  --fs-2xl: 22px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.06);
+  --shadow-lg: 0 8px 24px rgba(0,0,0,0.10);
+}

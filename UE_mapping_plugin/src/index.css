@@ -8,28 +8,36 @@
   box-sizing: border-box;
 }
 
+html, body, #root {
+  height: 100%;
+}
+
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background: #0f172a;
-  color: #f8fafc;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: var(--fs-md);
   overflow: hidden;
 }
 
-.react-flow__edge-path {
-  stroke: #6366f1;
-  stroke-width: 2;
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: transparent;
+  border: none;
+  cursor: pointer;
 }
 
-.react-flow__edge.animated .react-flow__edge-path {
-  animation: dash 1.5s linear infinite;
+input, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
 }
 
-@keyframes dash {
-  to {
-    stroke-dashoffset: 10;
-  }
-}
+a { color: var(--text-link); text-decoration: none; }
+a:hover { color: var(--text-link-hover); text-decoration: underline; }
+
+code { font-family: var(--font-mono); font-size: 12px; }

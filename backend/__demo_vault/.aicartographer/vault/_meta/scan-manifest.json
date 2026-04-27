@@ -1,0 +1,16 @@
+{
+  "last_full_scan": "2026-04-26T17:32:07Z",
+  "engine_version": "5.7",
+  "scan_results": {
+    "completed": 5,
+    "failed": 0,
+    "skipped": 0
+  },
+  "asset_hashes": {
+    "BP_GameMode": "b10651b029f0",
+    "BP_EnemyAI": "6fd1c793e1d8",
+    "BP_PlayerCharacter": "74922cdf6f38",
+    "BP_WeaponBase": "d632d9c6d941",
+    "BP_HealthComponent": "b5146141692a"
+  }
+}

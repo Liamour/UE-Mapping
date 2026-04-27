@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "extensible": true,
+  "description": "Default tag vocabulary shipped with AICartographer. Copied to <UEProject>/.aicartographer/vault/_meta/tag-vocabulary.json on first scan. Project-local copy takes precedence; developers may add genre-specific tags there.",
+  "axes": {
+    "system": {
+      "description": "Functional subsystem this node belongs to. Pick 1-3.",
+      "values": [
+        "gameplay-core",
+        "combat",
+        "ai",
+        "animation",
+        "physics",
+        "network",
+        "multiplayer-meta",
+        "ui",
+        "audio",
+        "vfx",
+        "cinematic",
+        "camera",
+        "input",
+        "world",
+        "spawn",
+        "persistence",
+        "progression",
+        "economy",
+        "analytics",
+        "tooling"
+      ]
+    },
+    "layer": {
+      "description": "Architectural layer. Pick exactly 1.",
+      "values": [
+        "gameplay",
+        "framework",
+        "ui",
+        "data",
+        "service",
+        "tooling"
+      ]
+    },
+    "role": {
+      "description": "UE structural role. Pick exactly 1.",
+      "values": [
+        "actor",
+        "component",
+        "widget",
+        "controller",
+        "gamemode",
+        "gamestate",
+        "playerstate",
+        "subsystem",
+        "interface",
+        "function-library",
+        "data-asset",
+        "data-table",
+        "struct",
+        "enum",
+        "animation-blueprint",
+        "behavior-tree"
+      ]
+    }
+  }
+}

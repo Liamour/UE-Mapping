@@ -1,0 +1,6 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+redis>=5.0
+openai>=1.50
+pyyaml>=6.0
