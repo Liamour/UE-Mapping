@@ -32,7 +32,11 @@ Thumbs.db
 # Scan output / runtime artifacts (per-project vault is generated, not source)
 .aicartographer/
 backend/__pycache__/
+backend/.venv/
 backend/dump_AST_*.json
+
+# UE plugin package output (RunUAT BuildPlugin -Package=... default lands here)
+/AICartographer/
 
 # Claude Code internals (worktrees, session state)
 .claude/
