@@ -2,6 +2,8 @@
 
 # AICartographer
 
+**[English](README.en.md) · 简体中文**
+
 **为 Unreal Engine 5 而生的 AI 蓝图地图仪**
 
 把整个 UE5 项目折叠成一张可点开、可叙事、可分析的地图 —— 由 LLM 给每个蓝图写下"它在做什么 / 谁调用谁"，由力导向图给你看清系统形状，由 Markdown vault 让你把笔记永久留在自己的项目里。
@@ -12,7 +14,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=fff)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-[功能特性](#-功能特性) · [架构](#-架构) · [四级视图](#-四级视图) · [快速开始](#-快速开始) · [LLM 厂商](#-llm-厂商支持) · [开发](#-开发)
+[功能特性](#功能特性) · [架构](#架构) · [四级视图](#四级视图) · [快速开始](#快速开始) · [LLM 厂商](#llm-厂商支持) · [开发](#开发)
 
 </div>
 
@@ -55,7 +57,7 @@ graph TB
         Plugin[AICartographer C++ 插件]
         WebView[CEF WebView<br/>嵌入 React UI]
         Plugin -->|BindUObject| WebView
-        Editor -.读取 UEdGraph.-> Plugin
+        Editor -.->|读取 UEdGraph| Plugin
     end
 
     subgraph Frontend["React 前端 (CEF 内)"]
@@ -91,7 +93,7 @@ graph TB
     Bridge <--> Plugin
     HTTP -->|可选降级| Routes
     VW --> MD
-    Bridge -.直读 .md.-> MD
+    Bridge -.->|直读 markdown| MD
     LP --> VOL
     LP --> ANT
 
