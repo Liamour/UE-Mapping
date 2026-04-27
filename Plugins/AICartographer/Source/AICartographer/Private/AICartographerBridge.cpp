@@ -14,7 +14,27 @@
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Misc/Crc.h"
 #include "GenericPlatform/GenericPlatformFile.h"
+
+// File-scope JSON helpers — shared by every UFUNCTION body and helper namespace
+// in this translation unit.  Hoisted out so the deep-scan code (defined before
+// the vault-FS namespace) and the vault code can call the same primitives.
+static FString SerializeJson(const TSharedRef<FJsonObject>& Obj)
+{
+    FString Out;
+    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
+    FJsonSerializer::Serialize(Obj, Writer);
+    return Out;
+}
+
+static FString MakeErrorJson(const FString& Error)
+{
+    TSharedRef<FJsonObject> Obj = MakeShareable(new FJsonObject());
+    Obj->SetBoolField(TEXT("ok"), false);
+    Obj->SetStringField(TEXT("error"), Error);
+    return SerializeJson(Obj);
+}
 
 void UAICartographerBridge::SendLogToUE(const FString& Message)
 {
@@ -177,164 +197,214 @@ FString UAICartographerBridge::RequestGraphData()
     return OutputString;
 }
 
-void UAICartographerBridge::RequestDeepScan(const FString& NodeId, const FString& AssetPath)
+// ---------------------------------------------------------------------------
+// Deep-scan + asset enumeration helpers used by the ScanOrchestrator UI.
+// ---------------------------------------------------------------------------
+
+namespace
 {
-    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] Received Deep Scan Request. Raw Path: %s"), *AssetPath); 
-
-    // 1. C++ SUBSTRING PURIFIER 
-    FString CleanPath = AssetPath; 
-    int32 GameIndex = CleanPath.Find(TEXT("/Game/")); 
-    
-    if (GameIndex != INDEX_NONE) 
-    { 
-        // Keep everything from /Game/ onwards 
-        CleanPath = CleanPath.Mid(GameIndex); 
-        
-        // Strip any trailing spaces or invalid characters if they exist 
-        FString Left, Right; 
-        if (CleanPath.Split(TEXT(" "), &Left, &Right)) { 
-            CleanPath = Left; 
-        } 
-    } 
-    else 
-    { 
-        UE_LOG(LogTemp, Error, TEXT("[SYS_ERR] Invalid Asset Path Structure. Missing '/Game/': %s"), *AssetPath); 
-        return; 
-    } 
-
-    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] Purified Path: %s"), *CleanPath); 
-
-    // 1. EXTRACT PACKAGE NAME FOR PRE-FLIGHT 
-    FString PackageName = CleanPath; 
-    int32 DotIndex; 
-    if (CleanPath.FindChar('.', DotIndex)) 
-    { 
-        // Extract everything to the left of the dot 
-        PackageName = CleanPath.Left(DotIndex); 
-    } 
-
-    // 2. THE PRE-FLIGHT CHECK 
-    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry"); 
-    TArray<FAssetData> AssetDataList; 
-
-    // Use the stripped PackageName for the registry query 
-    AssetRegistryModule.Get().GetAssetsByPackageName(FName(*PackageName), AssetDataList); 
-
-    if (AssetDataList.Num() == 0) 
-    { 
-        UE_LOG(LogTemp, Error, TEXT("[SYS_ERR] Pre-flight aborted. No asset found at package path: %s"), *PackageName); 
-        return; 
-    } 
-
-    bool bIsBlueprint = false; 
-    for (const FAssetData& Asset : AssetDataList) 
-    { 
-        if (Asset.AssetClassPath.GetAssetName() == TEXT("Blueprint")) 
-        { 
-            bIsBlueprint = true; 
-            break; 
-        } 
-    } 
-
-    if (!bIsBlueprint) 
-    { 
-        UE_LOG(LogTemp, Error, TEXT("[SYS_ERR] Pre-flight aborted. Asset is NOT a Blueprint: %s"), *PackageName); 
-        return; 
-    } 
-
-    // 3. SAFE TO LOAD 
-    // CRITICAL: We use the original FULL CleanPath (with the dot) for LoadObject! 
-    UBlueprint* LoadedBP = LoadObject<UBlueprint>(nullptr, *CleanPath); 
-    if (!LoadedBP) 
-    { 
-        UE_LOG(LogTemp, Error, TEXT("[SYS_ERR] LoadObject failed despite pre-flight pass: %s"), *CleanPath); 
-        return; 
-    } 
-
-    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] Blueprint Loaded Successfully! Ready for AST Dissection."));
-
-    // 1. Initialize JSON Arrays 
-    TArray<TSharedPtr<FJsonValue>> JsonNodes; 
-    TArray<TSharedPtr<FJsonValue>> JsonEdges; 
-
-    // 2. Iterate through the main Event Graphs 
-    for (UEdGraph* Graph : LoadedBP->UbergraphPages) 
-    { 
-        if (!Graph) continue; 
-
-        for (UEdGraphNode* Node : Graph->Nodes) 
-        { 
-            if (!Node) continue; 
-
-            // --- Serialize NODE --- 
-            TSharedPtr<FJsonObject> NodeObj = MakeShareable(new FJsonObject()); 
-            FString GraphNodeId = FString::Printf(TEXT("%p"), Node); // Use memory address as unique ID (avoid conflict with function parameter NodeId)
-            
-            NodeObj->SetStringField(TEXT("id"), GraphNodeId); 
-            NodeObj->SetStringField(TEXT("label"), Node->GetNodeTitle(ENodeTitleType::ListView).ToString()); 
-            NodeObj->SetNumberField(TEXT("x"), Node->NodePosX); 
-            NodeObj->SetNumberField(TEXT("y"), Node->NodePosY); 
-            
-            // --- Serialize PINS & EDGES --- 
-            TArray<TSharedPtr<FJsonValue>> JsonPins; 
-            for (UEdGraphPin* Pin : Node->Pins) 
-            { 
-                if (!Pin) continue; 
-
-                FString PinId = FString::Printf(TEXT("%p"), Pin); 
-                
-                TSharedPtr<FJsonObject> PinObj = MakeShareable(new FJsonObject()); 
-                PinObj->SetStringField(TEXT("pinId"), PinId); 
-                PinObj->SetStringField(TEXT("pinName"), Pin->PinName.ToString()); 
-                PinObj->SetStringField(TEXT("direction"), Pin->Direction == EGPD_Input ? TEXT("input") : TEXT("output")); 
-                JsonPins.Add(MakeShareable(new FJsonValueObject(PinObj))); 
-
-                // Extract Edges (Only process outputs to avoid duplicate edge creation) 
-                if (Pin->Direction == EGPD_Output) 
-                { 
-                    for (UEdGraphPin* LinkedPin : Pin->LinkedTo) 
-                    { 
-                        if (!LinkedPin) continue; 
-                        
-                        UEdGraphNode* TargetNode = LinkedPin->GetOwningNode(); 
-                        if (!TargetNode) continue; 
-
-                        TSharedPtr<FJsonObject> EdgeObj = MakeShareable(new FJsonObject()); 
-                        EdgeObj->SetStringField(TEXT("id"), FString::Printf(TEXT("edge_%p_%p"), Pin, LinkedPin)); 
-                        EdgeObj->SetStringField(TEXT("source"), GraphNodeId); 
-                        EdgeObj->SetStringField(TEXT("sourceHandle"), PinId); 
-                        EdgeObj->SetStringField(TEXT("target"), FString::Printf(TEXT("%p"), TargetNode)); 
-                        EdgeObj->SetStringField(TEXT("targetHandle"), FString::Printf(TEXT("%p"), LinkedPin)); 
-                        
-                        JsonEdges.Add(MakeShareable(new FJsonValueObject(EdgeObj))); 
-                    } 
-                } 
-            } 
-            NodeObj->SetArrayField(TEXT("pins"), JsonPins); 
-            JsonNodes.Add(MakeShareable(new FJsonValueObject(NodeObj))); 
-        } 
-    } 
-
-    // 3. Package and Dispatch 
-    TSharedPtr<FJsonObject> RootObj = MakeShareable(new FJsonObject()); 
-    RootObj->SetArrayField(TEXT("nodes"), JsonNodes); 
-    RootObj->SetArrayField(TEXT("edges"), JsonEdges); 
-
-    FString OutputJson; 
-    TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&OutputJson); 
-    FJsonSerializer::Serialize(RootObj.ToSharedRef(), Writer); 
-
-    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] AST Serialization Complete. Nodes: %d, Edges: %d"), JsonNodes.Num(), JsonEdges.Num()); 
-
-    // 4. Broadcast via existing Delegate 
-    if (OnDeepScanResult.IsBound())
+    // /Game/Path/BP.BP   →   /Game/Path/BP.BP   (idempotent, plus trailing-space scrub)
+    // /full/disk/.../Game/Path/BP.BP  →  /Game/Path/BP.BP
+    // Returns empty string if /Game/ marker is missing.
+    static FString PurifyGamePath(const FString& Raw)
     {
-        OnDeepScanResult.Execute(NodeId, OutputJson);
+        FString Clean = Raw;
+        int32 GameIndex = Clean.Find(TEXT("/Game/"));
+        if (GameIndex == INDEX_NONE) return FString();
+        Clean = Clean.Mid(GameIndex);
+        FString Left, Right;
+        if (Clean.Split(TEXT(" "), &Left, &Right)) Clean = Left;
+        return Clean;
     }
-    else
+
+    // Build a structural fingerprint of the Blueprint by walking every graph and
+    // recording each node's class + name and each pin's name + linked endpoints.
+    // Position fields (NodePosX/Y) are deliberately excluded so cosmetic moves
+    // don't invalidate the hash.
+    static FString ComputeBlueprintAstHash(UBlueprint* BP)
     {
-        UE_LOG(LogTemp, Error, TEXT("DeepScan Error: OnDeepScanResult delegate is not bound!"));
+        if (!BP) return TEXT("");
+
+        FString Buffer;
+        Buffer.Reserve(8192);
+
+        auto AppendGraph = [&Buffer](UEdGraph* Graph)
+        {
+            if (!Graph) return;
+            Buffer += Graph->GetName();
+            Buffer += TEXT("|");
+            for (UEdGraphNode* Node : Graph->Nodes)
+            {
+                if (!Node) continue;
+                Buffer += Node->GetClass()->GetName();
+                Buffer += TEXT(":");
+                Buffer += Node->GetName();
+                Buffer += TEXT("[");
+                for (UEdGraphPin* Pin : Node->Pins)
+                {
+                    if (!Pin) continue;
+                    Buffer += Pin->PinName.ToString();
+                    Buffer += TEXT(",");
+                    for (UEdGraphPin* Linked : Pin->LinkedTo)
+                    {
+                        if (!Linked || !Linked->GetOwningNode()) continue;
+                        Buffer += FString::Printf(TEXT("->%s.%s|"),
+                            *Linked->GetOwningNode()->GetName(),
+                            *Linked->PinName.ToString());
+                    }
+                    Buffer += TEXT(";");
+                }
+                Buffer += TEXT("]");
+            }
+            Buffer += TEXT("\n");
+        };
+
+        for (UEdGraph* G : BP->FunctionGraphs) AppendGraph(G);
+        for (UEdGraph* G : BP->UbergraphPages) AppendGraph(G);
+        for (UEdGraph* G : BP->MacroGraphs)    AppendGraph(G);
+        for (UEdGraph* G : BP->DelegateSignatureGraphs) AppendGraph(G);
+
+        const uint32 Crc = FCrc::StrCrc32<TCHAR>(*Buffer);
+        return FString::Printf(TEXT("%08x"), Crc);
     }
+
+    // Coarse classification matching the backend's ASTNodePayload.node_type enum.
+    static FString ClassifyBlueprintNodeType(UBlueprint* BP)
+    {
+        if (!BP) return TEXT("Blueprint");
+        if (BP->BlueprintType == BPTYPE_Interface) return TEXT("Interface");
+
+        UClass* Parent = BP->ParentClass;
+        if (Parent)
+        {
+            // Walk the parent chain so derived component blueprints still classify.
+            for (UClass* Cur = Parent; Cur; Cur = Cur->GetSuperClass())
+            {
+                if (Cur->GetName() == TEXT("ActorComponent")) return TEXT("Component");
+            }
+        }
+        return TEXT("Blueprint");
+    }
+}
+
+FString UAICartographerBridge::RequestDeepScan(const FString& AssetPath)
+{
+    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT_PROBE] DeepScan request: %s"), *AssetPath);
+
+    const FString CleanPath = PurifyGamePath(AssetPath);
+    if (CleanPath.IsEmpty())
+        return MakeErrorJson(FString::Printf(TEXT("invalid asset path (missing /Game/): %s"), *AssetPath));
+
+    // Pre-flight: ensure the package exists and is actually a Blueprint before
+    // calling LoadObject (which would otherwise log scary errors on miss).
+    FString PackageName = CleanPath;
+    int32 DotIndex;
+    if (CleanPath.FindChar('.', DotIndex))
+        PackageName = CleanPath.Left(DotIndex);
+
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    TArray<FAssetData> AssetDataList;
+    AssetRegistryModule.Get().GetAssetsByPackageName(FName(*PackageName), AssetDataList);
+
+    if (AssetDataList.Num() == 0)
+        return MakeErrorJson(FString::Printf(TEXT("no asset at package path: %s"), *PackageName));
+
+    bool bIsBlueprint = false;
+    for (const FAssetData& Asset : AssetDataList)
+    {
+        if (Asset.AssetClassPath.GetAssetName() == TEXT("Blueprint"))
+        {
+            bIsBlueprint = true;
+            break;
+        }
+    }
+    if (!bIsBlueprint)
+        return MakeErrorJson(FString::Printf(TEXT("asset is not a Blueprint: %s"), *PackageName));
+
+    UBlueprint* LoadedBP = LoadObject<UBlueprint>(nullptr, *CleanPath);
+    if (!LoadedBP)
+        return MakeErrorJson(FString::Printf(TEXT("LoadObject failed: %s"), *CleanPath));
+
+    const FString AstHash    = ComputeBlueprintAstHash(LoadedBP);
+    const FString NodeType   = ClassifyBlueprintNodeType(LoadedBP);
+    const FString Name       = LoadedBP->GetName();
+    FString ParentClass;
+    if (UClass* GenClass = LoadedBP->GeneratedClass)
+    {
+        if (UClass* Super = GenClass->GetSuperClass())
+            ParentClass = Super->GetName();
+    }
+    if (ParentClass.IsEmpty() && LoadedBP->ParentClass)
+        ParentClass = LoadedBP->ParentClass->GetName();
+
+    TSharedRef<FJsonObject> Root = MakeShareable(new FJsonObject());
+    Root->SetBoolField(TEXT("ok"), true);
+    Root->SetStringField(TEXT("asset_path"), CleanPath);
+    Root->SetStringField(TEXT("ast_hash"), AstHash);
+    Root->SetStringField(TEXT("node_type"), NodeType);
+    Root->SetStringField(TEXT("name"), Name);
+    Root->SetStringField(TEXT("parent_class"), ParentClass);
+
+    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] DeepScan: %s hash=%s type=%s parent=%s"),
+        *Name, *AstHash, *NodeType, *ParentClass);
+    return SerializeJson(Root);
+}
+
+FString UAICartographerBridge::ListBlueprintAssets(const FString& ProjectRoot)
+{
+    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] ListBlueprintAssets called (project_root=%s)"), *ProjectRoot);
+
+    FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    TArray<FAssetData> AssetDataList;
+
+    FARFilter Filter;
+    Filter.PackagePaths.Add(FName("/Game"));
+    Filter.bRecursivePaths = true;
+    Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("Blueprint")));
+    Filter.bIncludeOnlyOnDiskAssets = true;
+    AssetRegistryModule.Get().GetAssets(Filter, AssetDataList);
+
+    TArray<TSharedPtr<FJsonValue>> Assets;
+    Assets.Reserve(AssetDataList.Num());
+
+    for (const FAssetData& Asset : AssetDataList)
+    {
+        if (!Asset.IsValid()) continue;
+        if (Asset.AssetClassPath.GetAssetName() != TEXT("Blueprint")) continue;
+
+        FString TrueAssetPath = Asset.GetObjectPathString();
+        if (TrueAssetPath.EndsWith(TEXT("/")) || !TrueAssetPath.Contains(TEXT("."))) continue;
+
+        // Try to surface the parent class from registry tags without loading.
+        // UE stores it under "ParentClass" as e.g. "/Script/Engine.Actor".
+        FString ParentClassRaw;
+        Asset.GetTagValue(FName(TEXT("ParentClass")), ParentClassRaw);
+        FString ParentClassName;
+        if (!ParentClassRaw.IsEmpty())
+        {
+            int32 DotIdx;
+            if (ParentClassRaw.FindLastChar('.', DotIdx))
+                ParentClassName = ParentClassRaw.Mid(DotIdx + 1);
+            else
+                ParentClassName = ParentClassRaw;
+            ParentClassName.RemoveFromEnd(TEXT("'"));
+            ParentClassName.RemoveFromStart(TEXT("\""));
+            ParentClassName.RemoveFromEnd(TEXT("\""));
+        }
+
+        TSharedPtr<FJsonObject> Entry = MakeShareable(new FJsonObject());
+        Entry->SetStringField(TEXT("asset_path"), TrueAssetPath);
+        Entry->SetStringField(TEXT("name"), Asset.AssetName.ToString());
+        Entry->SetStringField(TEXT("parent_class"), ParentClassName);
+        Assets.Add(MakeShareable(new FJsonValueObject(Entry)));
+    }
+
+    TSharedRef<FJsonObject> Root = MakeShareable(new FJsonObject());
+    Root->SetBoolField(TEXT("ok"), true);
+    Root->SetArrayField(TEXT("assets"), Assets);
+
+    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] ListBlueprintAssets: %d Blueprint(s) found"), Assets.Num());
+    return SerializeJson(Root);
 }
 
 FString UAICartographerBridge::PingBridge()
@@ -405,21 +475,7 @@ namespace
         }
     };
 
-    static FString SerializeJson(const TSharedRef<FJsonObject>& Obj)
-    {
-        FString Out;
-        TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
-        FJsonSerializer::Serialize(Obj, Writer);
-        return Out;
-    }
-
-    static FString MakeErrorJson(const FString& Error)
-    {
-        TSharedRef<FJsonObject> Obj = MakeShareable(new FJsonObject());
-        Obj->SetBoolField(TEXT("ok"), false);
-        Obj->SetStringField(TEXT("error"), Error);
-        return SerializeJson(Obj);
-    }
+    // SerializeJson / MakeErrorJson have been hoisted to file scope (see top of file).
 
     // Replace the section starting at `## [ NOTES ]` heading (inclusive) with
     // a freshly rendered NOTES block carrying the user's content. If no heading

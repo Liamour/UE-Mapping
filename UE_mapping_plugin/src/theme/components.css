@@ -1010,6 +1010,50 @@
   font-size: var(--fs-sm);
   font-family: var(--font-mono);
 }
+.settings-status-error {
+  color: var(--text-warn, #f4a36b);
+  border: 1px solid var(--border-default);
+}
+
+/* ScanOrchestrator — Project Scan wizard inside SettingsModal */
+.scan-orchestrator { display: flex; flex-direction: column; gap: 8px; }
+.scan-orchestrator-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.scan-progress {
+  margin-top: 6px;
+  height: 6px;
+  width: 100%;
+  background: var(--bg-primary);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.scan-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 200ms ease-out;
+}
+.scan-failures {
+  margin-top: 8px;
+  font-size: var(--fs-xs);
+}
+.scan-failures summary {
+  cursor: pointer;
+  color: var(--text-warn, #f4a36b);
+}
+.scan-failures ul {
+  margin: 6px 0 0;
+  padding-left: 16px;
+  max-height: 160px;
+  overflow: auto;
+}
+.scan-failures li { margin-bottom: 4px; word-break: break-all; }
+.scan-failures code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
 
 /* QuickSwitcher */
 .quickswitcher {

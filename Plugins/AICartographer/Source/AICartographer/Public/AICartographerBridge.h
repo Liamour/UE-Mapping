@@ -3,9 +3,6 @@
 #include "UObject/NoExportTypes.h"
 #include "AICartographerBridge.generated.h"
 
-// 1. Declare the Delegate (Parameters: NodeId, ASTJsonString)
-DECLARE_DELEGATE_TwoParams(FOnDeepScanResult, const FString&, const FString&);
-
 UCLASS()
 class AICARTOGRAPHER_API UAICartographerBridge : public UObject
 {
@@ -20,9 +17,22 @@ public:
     UFUNCTION()
     FString RequestGraphData();
 
-    // JS 调用 UE: 触发蓝图深度扫描
+    // Synchronously load a Blueprint and return its AST fingerprint plus
+    // the metadata needed to assemble a ScanOrchestrator payload.
+    // Returns JSON envelope:
+    //   {"ok": true, "asset_path", "ast_hash", "node_type", "name", "parent_class"}
+    // ast_hash is a CRC32 over the structural fingerprint of every graph (nodes,
+    // pins, link topology) — stable across cosmetic/layout changes, sensitive to
+    // any topology edit.  Used by the frontend to dedupe against scan-manifest.
     UFUNCTION(BlueprintCallable, Category = "AICartographer|DeepScan")
-    void RequestDeepScan(const FString& NodeId, const FString& AssetPath);
+    FString RequestDeepScan(const FString& AssetPath);
+
+    // Enumerate every Blueprint asset under /Game/.  ProjectRoot is informational
+    // only — the AssetRegistry already knows what's mounted in the loaded project.
+    // Returns JSON envelope:
+    //   {"ok": true, "assets": [{"asset_path", "name", "parent_class"}, ...]}
+    UFUNCTION(BlueprintCallable, Category = "AICartographer|DeepScan")
+    FString ListBlueprintAssets(const FString& ProjectRoot);
 
     // JS 调用 UE: 心跳检测桥接状态
     UFUNCTION(BlueprintCallable, Category = "AICartographer|Bridge")
@@ -57,9 +67,6 @@ public:
     // Each edge: {id, source, sourceHandle, target, targetHandle, isExec}
     UFUNCTION(BlueprintCallable, Category = "AICartographer|DeepScan")
     FString ReadBlueprintFunctionFlow(const FString& AssetPath, const FString& FunctionName);
-
-    // 2. Expose the Delegate instance
-    FOnDeepScanResult OnDeepScanResult;
 
 private:
     // 节点净化为AST JSON格式

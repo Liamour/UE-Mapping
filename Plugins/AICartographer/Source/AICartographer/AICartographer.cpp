@@ -68,20 +68,8 @@ TSharedRef<SDockTab> FAICartographerModule::OnSpawnPluginTab(const FSpawnTabArgs
             }
         }));
 
-    // 4. Flat Binding for the Delegate using the Class Member
-    if (this->WebBrowserWidget.IsValid() && RPCBridge.IsValid())
-    {
-        RPCBridge->OnDeepScanResult.BindLambda([WeakBrowserPtr = this->WebBrowserWidget.ToWeakPtr()](const FString& NodeId, const FString& ASTJson)
-        {
-            if (TSharedPtr<SWebBrowser> BrowserPtr = WeakBrowserPtr.Pin())
-            {
-                FString JSCommand = FString::Printf(TEXT("window.receiveDeepScan(\"%s\", %s)"), *NodeId, *ASTJson);
-                BrowserPtr->ExecuteJavascript(JSCommand);
-            }
-        });
-        
-        UE_LOG(LogTemp, Warning, TEXT("[AICARTOGRAPHER_ARCHITECT] C++ Delegate Bound Synchronously."));
-    }
+    // RequestDeepScan is now a synchronous JS-callable UFUNCTION returning JSON
+    // directly to the caller — no async delegate plumbing required.
 
     return SNew(SDockTab)
         .TabRole(ETabRole::NomadTab)

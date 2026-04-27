@@ -11,7 +11,8 @@ interface AICartographerBridge {
   pingbridge?: () => Promise<string> | string;
   sendlogtoue?: (msg: string) => void;
   requestgraphdata?: () => Promise<string> | string;
-  requestdeepscan?: (nodeId: string, assetPath: string) => void;
+  requestdeepscan?: (assetPath: string) => Promise<string> | string;
+  listblueprintassets?: (projectRoot: string) => Promise<string> | string;
 
   listvaultfiles?: (projectRoot: string) => Promise<string> | string;
   readvaultfile?: (projectRoot: string, relativePath: string) => Promise<string> | string;
@@ -204,4 +205,45 @@ export function isFunctionFlowAvailable(): boolean {
 export function isVaultFileWriteAvailable(): boolean {
   const b = getBridge();
   return typeof b?.writevaultfile === 'function';
+}
+
+// ---- Project-wide scan orchestration -------------------------------------
+// One asset returned by ListBlueprintAssets.  parent_class is best-effort —
+// if the AssetRegistry tag is missing the C++ side returns an empty string.
+export interface BridgeAssetEntry {
+  asset_path: string;
+  name: string;
+  parent_class: string;
+}
+
+// Result of a single RequestDeepScan call.  ast_hash is a CRC32 fingerprint
+// the orchestrator can compare against the scan-manifest to skip unchanged
+// assets before submitting the batch to the backend.
+export interface BridgeDeepScanResult {
+  asset_path: string;
+  ast_hash: string;
+  node_type: string;       // "Blueprint" | "Interface" | "Component"
+  name: string;
+  parent_class: string;
+}
+
+export async function bridgeListBlueprintAssets(projectRoot: string): Promise<BridgeAssetEntry[]> {
+  const b = getBridge();
+  if (!b?.listblueprintassets) throw new Error('listblueprintassets not bound (rebuild C++ plugin)');
+  const result = await callBridgeJSON<{ ok: true; assets: BridgeAssetEntry[] }>(
+    b.listblueprintassets(projectRoot),
+    'listblueprintassets',
+  );
+  return result.assets ?? [];
+}
+
+export async function bridgeRequestDeepScan(assetPath: string): Promise<BridgeDeepScanResult> {
+  const b = getBridge();
+  if (!b?.requestdeepscan) throw new Error('requestdeepscan not bound (rebuild C++ plugin)');
+  return callBridgeJSON<BridgeDeepScanResult>(b.requestdeepscan(assetPath), 'requestdeepscan');
+}
+
+export function isDeepScanAvailable(): boolean {
+  const b = getBridge();
+  return typeof b?.requestdeepscan === 'function' && typeof b?.listblueprintassets === 'function';
 }

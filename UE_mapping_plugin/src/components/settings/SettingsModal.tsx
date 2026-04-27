@@ -2,8 +2,9 @@ import React, { useState } from 'react';
 import { useUIStore } from '../../store/useUIStore';
 import { useVaultStore } from '../../store/useVaultStore';
 import { rebuildBacklinks, checkBackendHealth } from '../../services/vaultApi';
-import { getBridgeStatus, getCandidateGlobals, isBridgeAvailable, isVaultFileWriteAvailable } from '../../services/bridgeApi';
+import { getBridgeStatus, getCandidateGlobals, isBridgeAvailable, isDeepScanAvailable, isVaultFileWriteAvailable } from '../../services/bridgeApi';
 import { rebuildSystemMOCs } from '../../services/mocGenerator';
+import { ScanOrchestrator } from './ScanOrchestrator';
 
 export const SettingsModal: React.FC = () => {
   const open = useUIStore((s) => s.settingsOpen);
@@ -85,6 +86,7 @@ export const SettingsModal: React.FC = () => {
   };
 
   const mocAvailable = isVaultFileWriteAvailable();
+  const scanAvailable = isDeepScanAvailable() && !!projectRoot;
 
   return (
     <div className="modal-backdrop" onClick={close}>
@@ -128,6 +130,16 @@ export const SettingsModal: React.FC = () => {
             )}
             {status && <div className="settings-status">{status}</div>}
           </section>
+          {scanAvailable && (
+            <section className="settings-section">
+              <h3>Project scan</h3>
+              <p className="muted">
+                Walks every Blueprint under <code>/Game/</code>, fingerprints its AST via the C++ bridge,
+                then ships changed assets to the backend LLM pipeline. Requires <code>uvicorn</code> + Redis running.
+              </p>
+              <ScanOrchestrator />
+            </section>
+          )}
           <section className="settings-section">
             <h3>Vault transport</h3>
             <BridgeStatusLine />
