@@ -35,12 +35,59 @@ import yaml
 VAULT_DIRNAME = ".aicartographer/vault"
 NOTES_HEADING = "## [ NOTES ]"
 NOTES_DIVIDER_COMMENT = "<!-- 此分隔线以下为开发者私域,扫描器永不修改 -->"
+# These two markers are machine-readable splice anchors — must NOT be translated;
+# rebuild_backlinks() searches for them as exact strings to find the splice region.
 BACKLINKS_START = "<!-- backlinks-start: AUTO-GENERATED, do not edit -->"
 BACKLINKS_END = "<!-- backlinks-end -->"
 
 DEFAULT_NOTES_BODY = (
     "*(在此处记录你对该节点的理解、坑点、TODO。重扫不会覆盖此区域。)*\n"
 )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Language strings — only the human-visible templates translate. Section
+# heading SLOTS like `## [ ... ]` translate too (the user reads them). The
+# `<!-- backlinks-start -->` markers do NOT — they're splice anchors.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_STRINGS_EN: Dict[str, str] = {
+    "intro": "## [ INTRO ]",
+    "members": "## [ MEMBERS ]",
+    "backlinks": "## [ BACKLINKS ]",
+    "system_risk_callout": "> [!system_risk] System risk: **{risk}**",
+    "members_caption": "*Full member list ({n}). Hub node marked with ★.*",
+    "no_narrative": "*(LLM did not emit a narrative block for this system — see [Project Overview](_overview.md) for the full project map.)*",
+    "system_aggregate": "*(system pages aggregate their members; per-BP backlinks live on each blueprint page.)*",
+    "no_backlinks_yet": "*(no backlinks yet — will populate after batch scan completes)*",
+    "no_incoming": "*(no incoming references)*",
+    "awaiting_llm": "*(awaiting LLM analysis)*",
+    "project_overview_title": "Project Overview",
+    "project_risk_callout": "> [!project_risk] Project risk: **{risk}**",
+    "overview_no_backlinks": "*(project overview has no backlinks — it sits above the graph.)*",
+    "edge_label": "edge",
+}
+
+_STRINGS_ZH: Dict[str, str] = {
+    "intro": "## [ 简介 ]",
+    "members": "## [ 成员 ]",
+    "backlinks": "## [ 反向链接 ]",
+    "system_risk_callout": "> [!system_risk] 系统风险等级：**{risk}**",
+    "members_caption": "*完整成员清单（{n} 个）。Hub 节点用 ★ 标记。*",
+    "no_narrative": "*(LLM 未为该系统输出叙事块 — 完整项目地图请参见 [项目总览](_overview.md)。)*",
+    "system_aggregate": "*(系统页聚合了该系统的所有成员；每个蓝图的反向链接位于其各自的页面上。)*",
+    "no_backlinks_yet": "*(尚未生成反向链接 — 批量扫描完成后会自动填充。)*",
+    "no_incoming": "*(无传入引用)*",
+    "awaiting_llm": "*(等待 LLM 分析中)*",
+    "project_overview_title": "项目总览",
+    "project_risk_callout": "> [!project_risk] 项目风险等级：**{risk}**",
+    "overview_no_backlinks": "*(项目总览没有反向链接 — 它位于图的顶层。)*",
+    "edge_label": "关系",
+}
+
+
+def _strings(language: Optional[str]) -> Dict[str, str]:
+    return _STRINGS_ZH if language == "zh" else _STRINGS_EN
 
 NODE_TYPE_TO_SUBDIR = {
     "Blueprint": "Blueprints",
@@ -218,7 +265,8 @@ def _render_frontmatter(fm: Dict[str, Any]) -> str:
 # Body assembly (everything above NOTES)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _render_body_above_notes(node: NodeRecord) -> str:
+def _render_body_above_notes(node: NodeRecord, language: Optional[str] = None) -> str:
+    s = _strings(language)
     parts: List[str] = []
     parts.append(f"# {node.title}\n")
 
@@ -229,11 +277,11 @@ def _render_body_above_notes(node: NodeRecord) -> str:
         # The LLM body already contains its own ### [ INTENT ] etc. headings.
         parts.append(node.full_analysis_markdown.rstrip() + "\n")
     else:
-        parts.append("*(awaiting LLM analysis)*\n")
+        parts.append(s["awaiting_llm"] + "\n")
 
-    parts.append("## [ BACKLINKS ]\n")
+    parts.append(s["backlinks"] + "\n")
     parts.append(BACKLINKS_START + "\n")
-    parts.append("*(no backlinks yet — will populate after batch scan completes)*\n")
+    parts.append(s["no_backlinks_yet"] + "\n")
     parts.append(BACKLINKS_END + "\n")
 
     return "\n".join(parts)
@@ -302,6 +350,7 @@ def write_node_file(
     node: NodeRecord,
     model: str = "unknown",
     engine_version: str = "5.7",
+    language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Write or update one vault file for `node`.
@@ -361,7 +410,7 @@ def write_node_file(
     )
 
     frontmatter_text = _render_frontmatter(fm)
-    body_text = _render_body_above_notes(node)
+    body_text = _render_body_above_notes(node, language=language)
     notes_text = existing_notes_block if existing_notes_block else _initial_notes_block()
 
     full_text = frontmatter_text + "\n" + body_text + "\n" + notes_text
@@ -438,10 +487,13 @@ def write_user_notes(project_root: str, relative_path: str, new_notes_body: str)
 # Backlinks reverse-index pass
 # ─────────────────────────────────────────────────────────────────────────────
 
-def rebuild_backlinks(project_root: str) -> Dict[str, int]:
+def rebuild_backlinks(project_root: str, language: Optional[str] = None) -> Dict[str, int]:
     """
     Walk every .md in vault, parse frontmatter `edges:`, build reverse map,
     then rewrite the BACKLINKS region of every file.
+
+    `language` controls the user-visible "no incoming references" placeholder.
+    Splice anchors stay literal regardless.
 
     Returns counts {nodes_scanned, nodes_with_backlinks, total_backlinks}.
     """
@@ -487,7 +539,7 @@ def rebuild_backlinks(project_root: str) -> Dict[str, int]:
         if incoming:
             nodes_with_backlinks += 1
             total += len(incoming)
-        new_block = _render_backlinks_block(incoming)
+        new_block = _render_backlinks_block(incoming, language=language)
         _splice_backlinks(path, new_block)
 
     return {
@@ -497,9 +549,10 @@ def rebuild_backlinks(project_root: str) -> Dict[str, int]:
     }
 
 
-def _render_backlinks_block(incoming: List[Dict[str, str]]) -> str:
+def _render_backlinks_block(incoming: List[Dict[str, str]], language: Optional[str] = None) -> str:
+    s = _strings(language)
     if not incoming:
-        return f"{BACKLINKS_START}\n*(no incoming references)*\n{BACKLINKS_END}\n"
+        return f"{BACKLINKS_START}\n{s['no_incoming']}\n{BACKLINKS_END}\n"
     lines = [BACKLINKS_START]
     for ref in incoming:
         lines.append(f"- [[{ref['source']}]] — `{ref['edge_type']}`")
@@ -564,7 +617,347 @@ def update_manifest(
     return p
 
 
-def is_unchanged(project_root: str, node_id: str, current_ast_hash: str) -> bool:
-    """Used by incremental scan to decide whether to skip this node entirely."""
+def is_unchanged(
+    project_root: str,
+    node_id: str,
+    current_ast_hash: str,
+    node_type: str = "Blueprint",
+) -> bool:
+    """Decide whether a node can be skipped on an incremental scan.
+
+    Two conditions must hold:
+      1. AST hash matches the previously recorded one in scan-manifest.json.
+      2. A real LLM-analysed .md exists for this node in the vault
+         (`frontmatter.analysis_state == 'llm'`).
+
+    Without (2), a vault that only ever ran framework-scan (skeleton writes)
+    would short-circuit every LLM scan and never produce real analysis. We
+    saw exactly that in the wild: 55 BPs all marked "skipped" with 0 wrote.
+    """
     manifest = load_manifest(project_root)
-    return manifest.get("asset_hashes", {}).get(node_id) == current_ast_hash
+    if manifest.get("asset_hashes", {}).get(node_id) != current_ast_hash:
+        return False
+    subdir = NODE_TYPE_TO_SUBDIR.get(node_type, "Blueprints")
+    md_path = vault_root(project_root) / subdir / f"{_sanitise_filename(node_id)}.md"
+    fm = read_existing_frontmatter(md_path)
+    if not fm:
+        return False
+    return fm.get("analysis_state") == "llm"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# L1 (project-level) IO — feeds the project clustering LLM call and writes
+# its output back to the vault as Systems/_overview.md + _meta/l1_overview.json.
+# ─────────────────────────────────────────────────────────────────────────────
+
+L1_OVERVIEW_REL = "Systems/_overview.md"
+L1_METADATA_REL = "_meta/l1_overview.json"
+
+
+def collect_l2_metadata(project_root: str) -> List[Dict[str, Any]]:
+    """Walk the vault's blueprint pages and extract the per-BP metadata that
+    feeds the L1 clustering call.  Skips Systems/_*.md (aggregate pages) and
+    files without a parseable scan block.
+
+    Each entry mirrors the L1_SYSTEM_PROMPT input contract:
+      {node_id, asset_path, intent, system, layer, role, risk_level, outbound_edges}
+    Tags are split back into their axes (the L2 writer stores them as
+    "#system/x", "#layer/y", "#role/z").
+    """
+    root = vault_root(project_root)
+    if not root.exists():
+        return []
+
+    summaries: List[Dict[str, Any]] = []
+    for path in root.rglob("*.md"):
+        if path.name.startswith("_"):
+            continue
+        # Skip aggregate Systems/<id>.md pages — they describe a system, not a member.
+        if path.parent.name == "Systems":
+            continue
+        fm = read_existing_frontmatter(path)
+        if not fm or not isinstance(fm, dict):
+            continue
+        if not fm.get("asset_path"):
+            continue
+
+        systems: List[str] = []
+        layer: Optional[str] = None
+        role: Optional[str] = None
+        for tag in (fm.get("tags") or []):
+            if not isinstance(tag, str):
+                continue
+            if tag.startswith("#system/"):
+                systems.append(tag[len("#system/"):])
+            elif tag.startswith("#layer/") and not layer:
+                layer = tag[len("#layer/"):]
+            elif tag.startswith("#role/") and not role:
+                role = tag[len("#role/"):]
+
+        edges_block = fm.get("edges") or {}
+        outbound: List[Dict[str, str]] = []
+        if isinstance(edges_block, dict):
+            for edge_type, entries in edges_block.items():
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("target"):
+                        outbound.append({
+                            "target": str(entry["target"]),
+                            "edge_type": str(edge_type),
+                        })
+
+        summaries.append({
+            "node_id": str(fm.get("id") or path.stem),
+            "asset_path": str(fm["asset_path"]),
+            "title": path.stem,
+            "node_type": str(fm.get("type") or "Blueprint"),
+            "intent": fm.get("intent"),
+            "system": systems,
+            "layer": layer,
+            "role": role,
+            "risk_level": str(fm.get("risk_level") or "nominal"),
+            "outbound_edges": outbound,
+        })
+    return summaries
+
+
+def write_l1_overview(
+    project_root: str,
+    metadata: Dict[str, Any],
+    analysis_markdown: str,
+    model: str = "unknown",
+    member_meta: Optional[List[Dict[str, Any]]] = None,
+    language: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Write the L1 result to:
+      - Systems/_overview.md         project narrative (frontmatter + ANALYSIS body)
+      - _meta/l1_overview.json       structured metadata for force-graph coloring
+      - Systems/<axis>.md            one file per LLM system, keyed by axis so the
+                                     frontend's existing `tags: #system/<axis>`
+                                     routing resolves directly to it
+
+    `member_meta` is the output of collect_l2_metadata — used to resolve member
+    asset_paths back to their vault filename + subdir for the per-system MEMBERS
+    list.  When omitted, member links are still rendered but default to the
+    Blueprints/ subdir which may 404 for Interfaces/Components.
+
+    Returns {"overview_path", "metadata_path", "system_paths": [...], "system_count"}.
+    """
+    root = vault_root(project_root)
+    (root / "Systems").mkdir(parents=True, exist_ok=True)
+    (root / "_meta").mkdir(parents=True, exist_ok=True)
+
+    s = _strings(language)
+    systems = metadata.get("systems") or []
+    cross_edges = metadata.get("cross_system_edges") or []
+    project_risk = metadata.get("project_risk_level") or "nominal"
+    scanned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    overview_title = s["project_overview_title"]
+    fm = {
+        "id": "_overview",
+        "type": "ProjectOverview",
+        "title": overview_title,
+        "scan": {
+            "scanned_at": scanned_at,
+            "model": model,
+            "stage": "L1",
+        },
+        "system_count": len(systems),
+        "project_risk_level": project_risk,
+        "analysis_state": "llm",
+    }
+    frontmatter_text = _render_frontmatter(fm)
+
+    body_parts: List[str] = [f"# {overview_title}\n"]
+    body_parts.append(s["project_risk_callout"].format(risk=project_risk) + "\n")
+    body_parts.append(analysis_markdown.rstrip() + "\n")
+    body_parts.append(s["backlinks"] + "\n")
+    body_parts.append(BACKLINKS_START + "\n")
+    body_parts.append(s["overview_no_backlinks"] + "\n")
+    body_parts.append(BACKLINKS_END + "\n")
+    body_text = "\n".join(body_parts)
+
+    overview_path = root / "Systems" / "_overview.md"
+    existing_notes = read_existing_notes(overview_path) if overview_path.exists() else None
+    notes_text = existing_notes if existing_notes else _initial_notes_block()
+    full_text = frontmatter_text + "\n" + body_text + "\n" + notes_text
+
+    tmp = overview_path.with_suffix(overview_path.suffix + ".tmp")
+    tmp.write_text(full_text, encoding="utf-8")
+    os.replace(tmp, overview_path)
+
+    metadata_path = root / "_meta" / "l1_overview.json"
+    metadata_payload = {
+        "scanned_at": scanned_at,
+        "model": model,
+        **metadata,
+    }
+    metadata_path.write_text(
+        json.dumps(metadata_payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # Per-system .md — one per LLM system, filename = axis (matches the
+    # frontend's `tags: #system/<axis>` → systemId convention).
+    system_paths: List[str] = []
+    asset_index = _build_member_index(member_meta or [])
+    for sys_obj in systems:
+        try:
+            written = _write_system_md(
+                root=root,
+                system=sys_obj,
+                analysis_markdown=analysis_markdown,
+                asset_index=asset_index,
+                model=model,
+                scanned_at=scanned_at,
+                language=language,
+            )
+            if written:
+                system_paths.append(written)
+        except Exception as e:  # pragma: no cover — never let one bad system block the others
+            print(f"[SYS_WARN] failed to write Systems/<axis>.md for "
+                  f"{sys_obj.get('id')}: {e}")
+
+    return {
+        "overview_path": str(overview_path),
+        "metadata_path": str(metadata_path),
+        "system_paths": system_paths,
+        "system_count": len(systems),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-system .md helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_member_index(member_meta: List[Dict[str, Any]]) -> Dict[str, Dict[str, str]]:
+    """asset_path → {title, subdir} for resolving member links.  Members not
+    present in this index are still rendered (using a Blueprint default subdir)
+    so the per-system .md doesn't silently drop unknown members."""
+    out: Dict[str, Dict[str, str]] = {}
+    for m in member_meta:
+        asset_path = m.get("asset_path") or ""
+        if not asset_path:
+            continue
+        title = m.get("title") or m.get("node_id") or asset_path.split("/")[-1].split(".")[0]
+        node_type = m.get("node_type") or "Blueprint"
+        subdir = NODE_TYPE_TO_SUBDIR.get(node_type, "Blueprints")
+        out[asset_path] = {"title": str(title), "subdir": subdir}
+    return out
+
+
+_SYS_BLOCK_RE = re.compile(
+    r"^### \[ (?P<title>.+?) \]\s*\n(?P<body>.*?)(?=^### \[|\Z)",
+    flags=re.MULTILINE | re.DOTALL,
+)
+
+
+def _extract_system_block(analysis_markdown: str, system_title: str) -> str:
+    """Pull the `### [ <system_title> ]` … (next ### or EOF) block out of the
+    L1 narrative.  Returns the block body (without the heading) trimmed.
+    Empty string when no matching heading exists."""
+    if not analysis_markdown or not system_title:
+        return ""
+    target = system_title.strip()
+    for m in _SYS_BLOCK_RE.finditer(analysis_markdown):
+        if m.group("title").strip().lower() == target.lower():
+            return m.group("body").strip()
+    return ""
+
+
+def _resolve_member_link(asset_path: str, asset_index: Dict[str, Dict[str, str]]) -> tuple[str, str]:
+    """Return (display_title, relative_link) for a member.  Falls back to the
+    asset name extracted from the path when we have no metadata for it."""
+    info = asset_index.get(asset_path)
+    if info:
+        title = info["title"]
+        subdir = info["subdir"]
+    else:
+        tail = asset_path.split("/")[-1]
+        title = tail.split(".")[0] or tail
+        subdir = "Blueprints"
+    safe_name = _sanitise_filename(title)
+    # Systems/<axis>.md links into ../Blueprints/<title>.md etc.
+    return title, f"../{subdir}/{safe_name}.md"
+
+
+def _write_system_md(
+    root: Path,
+    system: Dict[str, Any],
+    analysis_markdown: str,
+    asset_index: Dict[str, Dict[str, str]],
+    model: str,
+    scanned_at: str,
+    language: Optional[str] = None,
+) -> Optional[str]:
+    s = _strings(language)
+    axis = (system.get("axis") or system.get("id") or "").strip().lower()
+    if not axis:
+        return None  # malformed system entry — skip rather than write to "<empty>.md"
+
+    title = system.get("title") or axis
+    members = system.get("members") or []
+    hub_asset = system.get("hub")
+    risk_level = (system.get("risk_level") or "nominal").lower()
+
+    # Body — first inject the LLM's per-system narrative (if extractable),
+    # then append a deterministic MEMBERS list.  The LLM block already covers
+    # Intent / Critical Path / Risk so we don't duplicate those headings.
+    intro_block = _extract_system_block(analysis_markdown, title)
+
+    body_lines: List[str] = []
+    body_lines.append(f"# {title}\n")
+    body_lines.append(s["system_risk_callout"].format(risk=risk_level) + "\n")
+
+    body_lines.append(s["intro"])
+    if intro_block:
+        body_lines.append(intro_block)
+    else:
+        body_lines.append(s["no_narrative"])
+    body_lines.append("")
+
+    body_lines.append(s["members"])
+    body_lines.append(s["members_caption"].format(n=len(members)))
+    body_lines.append("")
+    for asset_path in members:
+        member_title, link = _resolve_member_link(asset_path, asset_index)
+        marker = " ★" if asset_path == hub_asset else ""
+        body_lines.append(f"- [{member_title}]({link}){marker}")
+    body_lines.append("")
+
+    body_lines.append(s["backlinks"])
+    body_lines.append(BACKLINKS_START)
+    body_lines.append(s["system_aggregate"])
+    body_lines.append(BACKLINKS_END)
+
+    body_text = "\n".join(body_lines)
+
+    fm = {
+        "title": title,
+        "node_type": "System",
+        "system_id": axis,
+        "system_slug": system.get("id") or axis,
+        "axis": axis,
+        "member_count": len(members),
+        "hub": hub_asset,
+        "risk_level": risk_level,
+        "scan": {
+            "scanned_at": scanned_at,
+            "model": model,
+            "stage": "L1",
+        },
+        "analysis_state": "llm",
+    }
+    frontmatter_text = _render_frontmatter(fm)
+
+    out_path = root / "Systems" / f"{_sanitise_filename(axis)}.md"
+    existing_notes = read_existing_notes(out_path) if out_path.exists() else None
+    notes_text = existing_notes if existing_notes else _initial_notes_block()
+
+    full_text = frontmatter_text + "\n" + body_text + "\n\n" + notes_text
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text(full_text, encoding="utf-8")
+    os.replace(tmp, out_path)
+    return str(out_path)

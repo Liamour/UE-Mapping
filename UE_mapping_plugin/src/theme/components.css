@@ -461,6 +461,18 @@
   height: 2px;
   border-radius: 1px;
 }
+/* Node-color swatch: square chip instead of a line, so the eye reads it as
+ * "node fill" not "edge stroke" in the same legend strip. */
+.edge-legend-swatch-node {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--border-strong);
+}
+.edge-legend-swatch-line {
+  width: 22px;
+  height: 2px;
+}
 .system-graph-canvas {
   flex: 1;
   background: var(--bg-primary);
@@ -488,10 +500,122 @@
   color: var(--text-primary);
 }
 .function-flow-header > div { display: flex; align-items: baseline; gap: 12px; }
+.function-flow-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 32px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+.function-flow-legend-sep {
+  display: inline-block;
+  width: 1px;
+  height: 14px;
+  background: var(--border-default);
+  margin: 0 4px;
+}
 .function-flow-canvas {
   flex: 1;
   background: var(--bg-primary);
   position: relative;
+}
+
+/* ============================================================================
+ * Lv2 — Blueprint internal force graph (graph mode counterpart of bp-focus).
+ * Reuses the system-graph layout primitives but lives in its own namespace
+ * so future divergence is friction-free.
+ * ========================================================================== */
+.bp-graph {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.bp-graph-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 32px 12px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.bp-graph-header h2 {
+  font-family: var(--font-mono);
+  font-size: var(--fs-lg);
+  color: var(--text-primary);
+}
+.bp-graph-header > div { display: flex; align-items: baseline; gap: 12px; }
+.bp-graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 32px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+.bp-graph-canvas {
+  flex: 1;
+  background: var(--bg-primary);
+  position: relative;
+}
+
+/* ============================================================================
+ * Tag-node — shared custom ReactFlow node used by every force graph (L1/L2/L3).
+ * Top "tag strip" reads the node category at a glance; body shows the label
+ * and an optional sub-label.  Sized to coexist with d3-force collide radii
+ * already tuned in each level's buildGraph.
+ * ========================================================================== */
+.tag-node {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 120px;
+  max-width: 220px;
+}
+.tag-node-tag {
+  align-self: flex-start;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-bottom: none;
+  border-radius: 4px 4px 0 0;
+  padding: 1px 6px;
+  margin-left: 6px;
+  position: relative;
+  z-index: 1;
+}
+.tag-node-body {
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: #fff;
+  box-shadow: var(--shadow-sm);
+  text-align: center;
+}
+.tag-node-label {
+  font-weight: 500;
+  word-break: break-word;
+}
+.tag-node-sublabel {
+  font-size: 9px;
+  opacity: 0.75;
+  margin-top: 2px;
+  word-break: break-word;
+}
+.tag-node-handle {
+  width: 1px !important;
+  height: 1px !important;
+  background: transparent !important;
+  border: none !important;
+  opacity: 0;
+  pointer-events: none;
 }
 
 /* react-flow overrides for light theme */
@@ -545,6 +669,8 @@
 .pill-risk-elevated { background: rgba(192, 138, 74, 0.15); color: var(--risk-elevated); border-color: rgba(192, 138, 74, 0.3); }
 .pill-risk-high { background: rgba(176, 74, 74, 0.15); color: var(--risk-high); border-color: rgba(176, 74, 74, 0.3); }
 .pill-risk-critical { background: rgba(176, 74, 74, 0.20); color: var(--risk-high); border-color: rgba(176, 74, 74, 0.45); font-weight: 600; }
+.pill-analysis-skeleton { background: rgba(150, 140, 120, 0.15); color: var(--text-muted); border-color: var(--border-subtle); font-family: var(--font-mono); }
+.pill-analysis-llm { background: rgba(90, 108, 138, 0.18); color: #4a6c8a; border-color: rgba(90, 108, 138, 0.35); font-family: var(--font-mono); }
 
 .bp-focus-intent {
   font-family: var(--font-serif);
@@ -1094,4 +1220,277 @@
   font-size: var(--fs-xs);
   border-top: 1px solid var(--border-subtle);
   background: var(--bg-secondary);
+}
+
+/* ============================================================================
+ * ActivityBar — Obsidian-style left rail (icons + Settings at bottom)
+ * ========================================================================== */
+.activitybar {
+  width: 44px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-subtle);
+  padding: 6px 0;
+}
+
+.activitybar-group {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.activitybar-bottom {
+  margin-top: auto;
+}
+
+.activitybar-btn {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease;
+  position: relative;
+}
+
+.activitybar-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.activitybar-btn-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.activitybar-btn-active::before {
+  content: '';
+  position: absolute;
+  left: -6px;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+/* ============================================================================
+ * ScanOrchestrator — category checkboxes (LLM scan filter)
+ * ========================================================================== */
+.scan-categories {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+
+.scan-categories-label {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.scan-category-chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.scan-category-chk input[type='checkbox'] {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.scan-category-chk input[type='checkbox']:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* settings-status-error reused by both scan panels for failures */
+.settings-status-error {
+  color: var(--risk-high);
+}
+
+/* ============================================================================
+ * LLM provider panel (Settings)
+ * ========================================================================== */
+.llm-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.llm-panel-privacy {
+  font-size: var(--fs-xs);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin: 0;
+}
+.llm-provider-tabs {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.llm-provider-tab {
+  padding: 8px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.llm-provider-tab:hover { color: var(--text-primary); }
+.llm-provider-tab-active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+  font-weight: 500;
+}
+.llm-provider-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 4px 0;
+}
+.llm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.llm-field-label {
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+.llm-field-hint {
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+.llm-radio-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.llm-radio-card {
+  flex: 1 1 160px;
+  min-width: 160px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.llm-radio-card:hover { border-color: var(--border-strong); }
+.llm-radio-card-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.llm-radio-card input[type="radio"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.llm-radio-card-label {
+  font-size: var(--fs-sm);
+  font-weight: 500;
+}
+.llm-radio-card-sub {
+  font-size: var(--fs-xs);
+  margin-top: 2px;
+}
+.llm-effort-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.llm-effort-btn {
+  flex: 1 1 90px;
+  min-width: 90px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+.llm-effort-btn:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.llm-effort-btn-active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.llm-effort-btn-sub {
+  font-size: 9px;
+  opacity: 0.7;
+  margin-top: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.llm-concurrency-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.llm-concurrency-row input[type="range"] { flex: 1; }
+.llm-concurrency-num { width: 70px; text-align: center; }
+.llm-panel-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border-subtle);
+  margin-top: 4px;
+}
+.llm-panel-clear {
+  margin-left: auto;
+  color: var(--risk-high) !important;
+}
+
+/* ============================================================================
+ * Lv2 — Deep reasoning button (single-node LLM trigger in BP focus header)
+ * ========================================================================== */
+.bp-focus-deep {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+}
+.deep-reason-btn {
+  font-size: var(--fs-sm);
+  padding: 6px 14px;
+}
+.deep-reason-btn-rerun {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  border: 1px solid var(--border-strong);
+}
+.deep-reason-btn-rerun:hover {
+  background: var(--accent-soft);
 }

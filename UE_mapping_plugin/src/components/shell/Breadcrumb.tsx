@@ -1,12 +1,15 @@
 import React from 'react';
 import { useTabsStore, type TabLocation } from '../../store/useTabsStore';
+import { useLang } from '../../utils/i18n';
+import type { OutputLanguage } from '../../store/useLLMStore';
 
 export const Breadcrumb: React.FC = () => {
+  const lang = useLang();
   const activeTab = useTabsStore((s) => s.tabs.find((t) => t.id === s.activeId));
   const navigate = useTabsStore((s) => s.navigateActive);
 
   if (!activeTab) return null;
-  const segments = locationToSegments(activeTab.location);
+  const segments = locationToSegments(activeTab.location, lang);
 
   return (
     <div className="breadcrumb">
@@ -25,13 +28,17 @@ export const Breadcrumb: React.FC = () => {
   );
 };
 
-function locationToSegments(loc: TabLocation): Array<{ label: string; target?: TabLocation }> {
+function locationToSegments(
+  loc: TabLocation,
+  lang: OutputLanguage,
+): Array<{ label: string; target?: TabLocation }> {
   const out: Array<{ label: string; target?: TabLocation }> = [];
-  out.push({ label: 'Project', target: { level: 'lv0' } });
+  out.push({ label: lang === 'zh' ? '项目' : 'Project', target: { level: 'lv0' } });
   if (loc.level === 'lv0') return out;
   if (loc.systemId) {
+    const unassigned = lang === 'zh' ? '未归类' : 'Unassigned';
     out.push({
-      label: loc.systemId === '_unassigned' ? 'Unassigned' : loc.systemId,
+      label: loc.systemId === '_unassigned' ? unassigned : loc.systemId,
       target: { level: 'lv1', systemId: loc.systemId },
     });
   }

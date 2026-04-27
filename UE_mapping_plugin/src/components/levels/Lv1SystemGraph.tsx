@@ -4,7 +4,6 @@ import ReactFlow, {
   Controls,
   type Edge,
   type Node,
-  Position,
   useNodesState,
   useEdgesState,
 } from 'reactflow';
@@ -15,18 +14,24 @@ import {
   forceManyBody,
   forceCenter,
   forceCollide,
+  forceX,
+  forceY,
   type SimulationNodeDatum,
 } from 'd3-force';
 import { useVaultStore } from '../../store/useVaultStore';
 import { useTabsStore } from '../../store/useTabsStore';
 import { summarize, nodeColor } from '../../utils/vaultIndex';
 import type { VaultEdge } from '../../utils/frontmatter';
+import { tagNodeTypes, type TagNodeData } from '../graph/TagNode';
+import { L1ScanButton } from './L1ScanButton';
+import { useT } from '../../utils/i18n';
 
 interface Props {
   systemId: string;
 }
 
 export const Lv1SystemGraph: React.FC<Props> = ({ systemId }) => {
+  const t = useT();
   const files = useVaultStore((s) => s.files);
   const fileCache = useVaultStore((s) => s.fileCache);
   const loadFile = useVaultStore((s) => s.loadFile);
@@ -50,17 +55,22 @@ export const Lv1SystemGraph: React.FC<Props> = ({ systemId }) => {
     [files, fileCache],
   );
   const inSystem = useMemo(
-    () => summaries.filter((s) =>
-      systemId === '_unassigned'
-        ? s.systems.length === 0
-        : s.systems.includes(systemId)
-    ),
+    () => summaries
+      // System .md files (Systems/<id>.md) and the project-overview page are
+      // aggregate intros, not graph members — exclude them so they don't
+      // appear as orphan nodes.
+      .filter((s) => s.nodeType !== 'System' && s.nodeType !== 'ProjectOverview')
+      .filter((s) => {
+        if (systemId === '_overview') return true;        // show every BP for the project map
+        if (systemId === '_unassigned') return s.systems.length === 0;
+        return s.systems.includes(systemId);
+      }),
     [summaries, systemId],
   );
 
   const built = useMemo(() => buildGraph(inSystem, fileCache), [inSystem, fileCache]);
 
-  const [nodes, setNodes, onNodesChange] = useNodesState(built.nodes);
+  const [nodes, setNodes, onNodesChange] = useNodesState<TagNodeData>(built.nodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(built.edges);
 
   // When the underlying graph recomputes (new files load, system switches),
@@ -79,14 +89,16 @@ export const Lv1SystemGraph: React.FC<Props> = ({ systemId }) => {
   if (inSystem.length === 0) {
     return (
       <div className="empty-state">
-        <p>No nodes tagged with <code>system/{systemId}</code> yet.</p>
+        <p>
+          {t({ en: 'No nodes tagged with', zh: '尚无节点带有标签' })}{' '}
+          <code>system/{systemId}</code>{t({ en: ' yet.', zh: '。' })}
+        </p>
       </div>
     );
   }
 
-  // Legend reflects the edge-color map below; only show entries actually present
-  // in the current graph so the header doesn't lie about edge types that aren't
-  // visible.
+  // Legends only surface symbols that actually appear in the current graph,
+  // so the header doesn't lie about types/colors that aren't visible.
   const presentEdgeTypes = useMemo(() => {
     const set = new Set<string>();
     for (const e of built.edges) {
@@ -96,18 +108,37 @@ export const Lv1SystemGraph: React.FC<Props> = ({ systemId }) => {
     }
     return Array.from(set).sort();
   }, [built]);
+  const presentNodeTypes = useMemo(() => {
+    const set = new Set<string>();
+    for (const n of inSystem) set.add(n.nodeType);
+    return Array.from(set).sort();
+  }, [inSystem]);
 
   return (
     <div className="system-graph">
       <div className="system-graph-header">
         <h2>{formatSystem(systemId)}</h2>
-        <span className="muted">{inSystem.length} nodes</span>
+        <span className="muted">{t({ en: `${inSystem.length} nodes`, zh: `${inSystem.length} 个节点` })}</span>
+        <L1ScanButton />
+        {presentNodeTypes.length > 0 && (
+          <div className="edge-legend" title={t({ en: 'Node colors', zh: '节点颜色' })}>
+            {presentNodeTypes.map((nt) => (
+              <span key={nt} className="edge-legend-item">
+                <span
+                  className="edge-legend-swatch edge-legend-swatch-node"
+                  style={{ background: nodeColor(nt) }}
+                />
+                {nt}
+              </span>
+            ))}
+          </div>
+        )}
         {presentEdgeTypes.length > 0 && (
-          <div className="edge-legend">
-            {presentEdgeTypes.map((t) => (
-              <span key={t} className="edge-legend-item">
-                <span className="edge-legend-swatch" style={{ background: edgeColor(t) }} />
-                {t}
+          <div className="edge-legend" title={t({ en: 'Edge colors', zh: '边颜色' })}>
+            {presentEdgeTypes.map((et) => (
+              <span key={et} className="edge-legend-item">
+                <span className="edge-legend-swatch" style={{ background: edgeColor(et) }} />
+                {et}
               </span>
             ))}
           </div>
@@ -117,6 +148,7 @@ export const Lv1SystemGraph: React.FC<Props> = ({ systemId }) => {
         <ReactFlow
           nodes={nodes}
           edges={edges}
+          nodeTypes={tagNodeTypes}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           fitView
@@ -128,8 +160,10 @@ export const Lv1SystemGraph: React.FC<Props> = ({ systemId }) => {
           minZoom={0.2}
           maxZoom={2}
           onNodeClick={(_e, n) => {
-            const path = (n.data as any).relativePath as string | undefined;
-            if (path) navigate({ level: 'lv2', relativePath: path, systemId }, n.data.label as string);
+            // AppShell dispatches lv2 to markdown- or graph-flavored renderer
+            // based on the current viewMode — we only need to set the level.
+            const path = n.data.relativePath as string | undefined;
+            if (path) navigate({ level: 'lv2', relativePath: path, systemId }, n.data.label);
           }}
         >
           <Background gap={32} color="#e2dfd4" />
@@ -142,6 +176,7 @@ export const Lv1SystemGraph: React.FC<Props> = ({ systemId }) => {
 
 function formatSystem(id: string): string {
   if (id === '_unassigned') return 'Unassigned';
+  if (id === '_overview') return 'Project Overview';
   return id.charAt(0).toUpperCase() + id.slice(1);
 }
 
@@ -156,7 +191,7 @@ interface SimNode extends SimulationNodeDatum {
 function buildGraph(
   summaries: Array<ReturnType<typeof summarize>>,
   fileCache: ReturnType<typeof useVaultStore.getState>['fileCache'],
-): { nodes: Node[]; edges: Edge[] } {
+): { nodes: Node<TagNodeData>[]; edges: Edge[] } {
   const titleToPath: Record<string, string> = {};
   for (const s of summaries) titleToPath[s.title] = s.relativePath;
 
@@ -180,9 +215,12 @@ function buildGraph(
     }
   }
 
-  // d3-force simulation — pre-converged. Larger graphs need a wider canvas;
-  // scale link distance + collision radius by node count so the layout
-  // doesn't pile up when the graph grows.
+  // d3-force simulation — pre-converged. Parameters scale with node count so
+  // small (3-8 node) and large (50+ node) graphs both converge to a readable
+  // layout.  forceX/forceY anchor every node toward the origin so disconnected
+  // components don't drift to infinity (forceCenter alone only moves the
+  // centroid, not individual orphans).  forceManyBody.distanceMax caps the
+  // long-range repulsion that otherwise pushes outliers off-canvas.
   const simNodes: SimNode[] = summaries.map((s, i) => ({
     id: s.relativePath,
     title: s.title,
@@ -193,43 +231,37 @@ function buildGraph(
   }));
   const simLinks = rawEdges.map((e) => ({ source: e.source, target: e.target }));
 
-  // Tuned for dense small graphs (3-8 nodes with bidirectional edges) where
-  // under-spread leads to overlapping labels/lines. For larger graphs (20+),
-  // these parameters still converge cleanly because forceManyBody scales
-  // by node count automatically.
-  const linkDistance = 220;
-  const repulsion = -800;
-  const collideRadius = 95;
+  const N = simNodes.length;
+  const linkDistance     = N <= 8 ? 220 : N <= 30 ? 180 : 150;
+  const repulsion        = N <= 8 ? -800 : N <= 30 ? -500 : -350;
+  const collideRadius    = N <= 8 ? 95  : N <= 30 ? 85  : 75;
+  const centerStrength   = N <= 8 ? 0.04 : N <= 30 ? 0.08 : 0.12;
+  const distanceMax      = N <= 8 ? 1200 : N <= 30 ? 800 : 600;
+  const collideIters     = N <= 30 ? 2 : 3;
+  const ticks            = N <= 30 ? 320 : 480;
 
   const sim = forceSimulation<SimNode>(simNodes)
     .force('link', forceLink<SimNode, { source: string | SimNode; target: string | SimNode }>(simLinks)
       .id((d) => d.id)
       .distance(linkDistance)
-      .strength(0.5))
-    .force('charge', forceManyBody<SimNode>().strength(repulsion))
+      .strength(0.6))
+    .force('charge', forceManyBody<SimNode>().strength(repulsion).distanceMax(distanceMax))
     .force('center', forceCenter(0, 0))
-    .force('collide', forceCollide<SimNode>(collideRadius))
+    .force('x', forceX<SimNode>(0).strength(centerStrength))
+    .force('y', forceY<SimNode>(0).strength(centerStrength))
+    .force('collide', forceCollide<SimNode>(collideRadius).iterations(collideIters).strength(0.95))
     .stop();
-  // Run a fixed number of ticks then freeze. 240 is enough for ~50 nodes
-  // to settle without making the build feel sluggish.
-  for (let i = 0; i < 240; i++) sim.tick();
+  for (let i = 0; i < ticks; i++) sim.tick();
 
-  const nodes: Node[] = simNodes.map((s) => ({
+  const nodes: Node<TagNodeData>[] = simNodes.map((s) => ({
     id: s.id,
+    type: 'tag',
     position: { x: s.x ?? 0, y: s.y ?? 0 },
-    data: { label: s.title, relativePath: s.id, nodeType: s.nodeType },
-    sourcePosition: Position.Right,
-    targetPosition: Position.Left,
-    style: {
-      background: nodeColor(s.nodeType),
-      color: '#fff',
-      border: '1px solid var(--border-strong)',
-      borderRadius: 8,
-      padding: '6px 10px',
-      fontSize: 12,
-      boxShadow: 'var(--shadow-sm)',
-      minWidth: 120,
-      textAlign: 'center' as const,
+    data: {
+      label: s.title,
+      tag: s.nodeType.toLowerCase(),
+      color: nodeColor(s.nodeType),
+      relativePath: s.id,
     },
   }));
 
@@ -255,6 +287,7 @@ function edgeColor(edgeType: string): string {
     case 'cast': return '#4a6c8a';
     case 'spawn': return '#6c8a4a';
     case 'listens_to': return '#8a6c4a';
+    case 'inheritance': return '#7a4a8a';
     default: return '#a39f8e';
   }
 }

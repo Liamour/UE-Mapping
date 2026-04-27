@@ -4,12 +4,17 @@
 #include "Serialization/JsonWriter.h"
 #include "UObject/Class.h"
 #include "Engine/Blueprint.h"
+#include "Engine/SimpleConstructionScript.h"
+#include "Engine/SCS_Node.h"
 #include "Misc/PackageName.h"
 #include "AssetRegistry/AssetIdentifier.h"
 #include "EdGraph/EdGraphNode.h"
 #include "K2Node_CallFunction.h"
 #include "K2Node_Event.h"
 #include "K2Node_CustomEvent.h"
+#include "K2Node_DynamicCast.h"
+#include "K2Node_SpawnActorFromClass.h"
+#include "K2Node_BaseMCDelegate.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Misc/FileHelper.h"
@@ -285,6 +290,224 @@ namespace
         }
         return TEXT("Blueprint");
     }
+
+    // Resolve a UClass back to the on-disk Blueprint asset path that generated
+    // it.  Returns empty string for native engine classes (which have no BP).
+    // Used by the framework-scan edge extractor to ignore engine-only references.
+    static FString BlueprintAssetPathFromClass(UClass* Cls)
+    {
+        if (!Cls) return FString();
+        UObject* GeneratedBy = Cls->ClassGeneratedBy;
+        if (!GeneratedBy) return FString();
+        UBlueprint* BP = Cast<UBlueprint>(GeneratedBy);
+        if (!BP) return FString();
+        // GetPathName() returns "/Game/Path/BP_X.BP_X" — exactly the format the
+        // frontend uses for asset_path everywhere else.
+        return BP->GetPathName();
+    }
+
+    // Helper: name the graph that a node lives in. For functions this is the
+    // function name; for ubergraph pages (event graph) we walk up to the page.
+    static FString GraphLabel(UEdGraph* Graph)
+    {
+        if (!Graph) return TEXT("");
+        return Graph->GetName();
+    }
+
+    // Append every user-visible function/event/custom-event entry into Out.
+    // Skips compiler-generated graphs (UbergraphPages contain events but the
+    // graph itself isn't a "function" — we surface its events instead).
+    static void ExtractFunctions(UBlueprint* BP, TArray<TSharedPtr<FJsonValue>>& Out)
+    {
+        if (!BP) return;
+        TSet<FString> Seen;
+        auto AddEntry = [&Out, &Seen](const FString& Name, const FString& Kind)
+        {
+            const FString Key = Kind + TEXT(":") + Name;
+            if (Name.IsEmpty() || Seen.Contains(Key)) return;
+            Seen.Add(Key);
+            TSharedPtr<FJsonObject> Entry = MakeShareable(new FJsonObject());
+            Entry->SetStringField(TEXT("name"), Name);
+            Entry->SetStringField(TEXT("kind"), Kind);
+            Out.Add(MakeShareable(new FJsonValueObject(Entry)));
+        };
+
+        for (UEdGraph* G : BP->FunctionGraphs)
+        {
+            if (!G) continue;
+            const FString GName = G->GetName();
+            // UbergraphPages also surface here in some BP variants; skip the
+            // implicit constructor.
+            if (GName.Equals(TEXT("UserConstructionScript"), ESearchCase::IgnoreCase)) continue;
+            AddEntry(GName, TEXT("function"));
+        }
+        for (UEdGraph* G : BP->UbergraphPages)
+        {
+            if (!G) continue;
+            for (UEdGraphNode* N : G->Nodes)
+            {
+                if (!N) continue;
+                if (UK2Node_CustomEvent* CE = Cast<UK2Node_CustomEvent>(N))
+                {
+                    AddEntry(CE->GetFunctionName().ToString(), TEXT("custom_event"));
+                }
+                else if (UK2Node_Event* Ev = Cast<UK2Node_Event>(N))
+                {
+                    AddEntry(Ev->GetFunctionName().ToString(), TEXT("event"));
+                }
+            }
+        }
+        for (UEdGraph* G : BP->DelegateSignatureGraphs)
+        {
+            if (!G) continue;
+            AddEntry(G->GetName(), TEXT("dispatcher"));
+        }
+    }
+
+    // Walk the SCS to surface BP-defined components.  Native components added
+    // in C++ aren't included here — they show up via the parent class instead.
+    // Parent lookup walks every SCS node's ChildNodes list rather than calling
+    // FindParentNode so we don't depend on a specific UE-version API surface.
+    static void ExtractComponents(UBlueprint* BP, TArray<TSharedPtr<FJsonValue>>& Out)
+    {
+        USimpleConstructionScript* SCS = BP ? BP->SimpleConstructionScript : nullptr;
+        if (!SCS) return;
+        const TArray<USCS_Node*>& Nodes = SCS->GetAllNodes();
+
+        // Build child→parent index in O(N) instead of O(N^2) on FindParentNode.
+        TMap<USCS_Node*, USCS_Node*> ChildToParent;
+        for (USCS_Node* Parent : Nodes)
+        {
+            if (!Parent) continue;
+            for (USCS_Node* Child : Parent->GetChildNodes())
+            {
+                if (Child) ChildToParent.Add(Child, Parent);
+            }
+        }
+
+        for (USCS_Node* N : Nodes)
+        {
+            if (!N) continue;
+            TSharedPtr<FJsonObject> Entry = MakeShareable(new FJsonObject());
+            Entry->SetStringField(TEXT("name"), N->GetVariableName().ToString());
+            Entry->SetStringField(TEXT("class"), N->ComponentClass ? N->ComponentClass->GetName() : TEXT("Unknown"));
+            FString ParentName;
+            if (USCS_Node** Parent = ChildToParent.Find(N))
+            {
+                if (*Parent) ParentName = (*Parent)->GetVariableName().ToString();
+            }
+            Entry->SetStringField(TEXT("parent"), ParentName);
+            Out.Add(MakeShareable(new FJsonValueObject(Entry)));
+        }
+    }
+
+    // Emit an outbound edge entry, deduped by (target, kind, from_function).
+    static void EmitEdge(
+        TArray<TSharedPtr<FJsonValue>>& Out,
+        TSet<FString>& Seen,
+        const FString& TargetAsset,
+        const FString& TargetFunction,
+        const FString& Kind,
+        const FString& FromFunction)
+    {
+        if (TargetAsset.IsEmpty()) return;
+        const FString Key = TargetAsset + TEXT("|") + TargetFunction + TEXT("|") + Kind + TEXT("|") + FromFunction;
+        if (Seen.Contains(Key)) return;
+        Seen.Add(Key);
+
+        TSharedPtr<FJsonObject> Entry = MakeShareable(new FJsonObject());
+        Entry->SetStringField(TEXT("target_asset"), TargetAsset);
+        if (!TargetFunction.IsEmpty()) Entry->SetStringField(TEXT("target_function"), TargetFunction);
+        Entry->SetStringField(TEXT("kind"), Kind);
+        Entry->SetStringField(TEXT("from_function"), FromFunction);
+        Out.Add(MakeShareable(new FJsonValueObject(Entry)));
+    }
+
+    // Walk every graph in the Blueprint and emit BP→BP edges for the edge
+    // kinds the framework-scan UI cares about.  Engine-class targets are
+    // discarded (they would explode the graph and aren't user authored).
+    //
+    // Also emits a single `inherits` edge for the parent class when the parent
+    // resolves to a BP-generated class (so BPC_TownCenter → BP_BuildingBase
+    // shows up as a typed edge rather than a frontmatter-only `parent_class`
+    // scalar that the L1 force graph never reads).
+    static void ExtractEdges(
+        UBlueprint* BP,
+        const FString& SelfAssetPath,
+        TArray<TSharedPtr<FJsonValue>>& Out)
+    {
+        if (!BP) return;
+        TSet<FString> Seen;
+
+        // Inheritance edge — direct parent only.  Walking the full chain would
+        // double-count (BP_Crop_Corn → BP_BaseCrop → BP_Interactable) since
+        // each BP's own scan emits its parent edge separately.
+        UClass* ParentCls = nullptr;
+        if (UClass* GenClass = BP->GeneratedClass) ParentCls = GenClass->GetSuperClass();
+        if (!ParentCls) ParentCls = BP->ParentClass;
+        const FString ParentBP = BlueprintAssetPathFromClass(ParentCls);
+        if (!ParentBP.IsEmpty() && ParentBP != SelfAssetPath)
+        {
+            EmitEdge(Out, Seen, ParentBP, FString(), TEXT("inherits"), TEXT(""));
+        }
+
+        auto WalkGraph = [&](UEdGraph* Graph, const FString& FromFunction)
+        {
+            if (!Graph) return;
+            for (UEdGraphNode* Node : Graph->Nodes)
+            {
+                if (!Node) continue;
+
+                if (UK2Node_CallFunction* Call = Cast<UK2Node_CallFunction>(Node))
+                {
+                    UClass* Target = Call->FunctionReference.GetMemberParentClass();
+                    const FString TargetBP = BlueprintAssetPathFromClass(Target);
+                    if (!TargetBP.IsEmpty() && TargetBP != SelfAssetPath)
+                    {
+                        EmitEdge(Out, Seen, TargetBP, Call->GetFunctionName().ToString(),
+                            TEXT("call"), FromFunction);
+                    }
+                }
+                else if (UK2Node_DynamicCast* CastNode = Cast<UK2Node_DynamicCast>(Node))
+                {
+                    UClass* Target = CastNode->TargetType;
+                    const FString TargetBP = BlueprintAssetPathFromClass(Target);
+                    if (!TargetBP.IsEmpty() && TargetBP != SelfAssetPath)
+                    {
+                        EmitEdge(Out, Seen, TargetBP, FString(),
+                            TEXT("cast"), FromFunction);
+                    }
+                }
+                else if (UK2Node_SpawnActorFromClass* Spawn = Cast<UK2Node_SpawnActorFromClass>(Node))
+                {
+                    UClass* Target = Spawn->GetClassToSpawn();
+                    const FString TargetBP = BlueprintAssetPathFromClass(Target);
+                    if (!TargetBP.IsEmpty() && TargetBP != SelfAssetPath)
+                    {
+                        EmitEdge(Out, Seen, TargetBP, FString(),
+                            TEXT("spawn"), FromFunction);
+                    }
+                }
+                else if (UK2Node_BaseMCDelegate* Del = Cast<UK2Node_BaseMCDelegate>(Node))
+                {
+                    UClass* Target = Del->DelegateReference.GetMemberParentClass();
+                    const FString TargetBP = BlueprintAssetPathFromClass(Target);
+                    if (!TargetBP.IsEmpty() && TargetBP != SelfAssetPath)
+                    {
+                        EmitEdge(Out, Seen, TargetBP,
+                            Del->DelegateReference.GetMemberName().ToString(),
+                            TEXT("delegate"), FromFunction);
+                    }
+                }
+            }
+        };
+
+        for (UEdGraph* G : BP->FunctionGraphs) WalkGraph(G, GraphLabel(G));
+        // Ubergraph pages don't have a single "function" — use the page name as
+        // a coarse anchor.  The frontend collapses by source BP anyway.
+        for (UEdGraph* G : BP->UbergraphPages) WalkGraph(G, GraphLabel(G));
+        for (UEdGraph* G : BP->MacroGraphs)    WalkGraph(G, GraphLabel(G));
+    }
 }
 
 FString UAICartographerBridge::RequestDeepScan(const FString& AssetPath)
@@ -345,8 +568,24 @@ FString UAICartographerBridge::RequestDeepScan(const FString& AssetPath)
     Root->SetStringField(TEXT("name"), Name);
     Root->SetStringField(TEXT("parent_class"), ParentClass);
 
-    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] DeepScan: %s hash=%s type=%s parent=%s"),
-        *Name, *AstHash, *NodeType, *ParentClass);
+    // Framework-scan extras: functions, components, edges. These let the
+    // frontend draw the full L1/L2 force graph and write skeleton .md files
+    // without going through the LLM.
+    TArray<TSharedPtr<FJsonValue>> Functions;
+    ExtractFunctions(LoadedBP, Functions);
+    Root->SetArrayField(TEXT("functions"), Functions);
+
+    TArray<TSharedPtr<FJsonValue>> Components;
+    ExtractComponents(LoadedBP, Components);
+    Root->SetArrayField(TEXT("components"), Components);
+
+    TArray<TSharedPtr<FJsonValue>> Edges;
+    ExtractEdges(LoadedBP, CleanPath, Edges);
+    Root->SetArrayField(TEXT("edges"), Edges);
+
+    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] DeepScan: %s hash=%s type=%s parent=%s · %d func / %d comp / %d edge"),
+        *Name, *AstHash, *NodeType, *ParentClass,
+        Functions.Num(), Components.Num(), Edges.Num());
     return SerializeJson(Root);
 }
 

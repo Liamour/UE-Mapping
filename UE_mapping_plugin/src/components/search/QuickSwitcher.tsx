@@ -2,8 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useUIStore } from '../../store/useUIStore';
 import { useVaultStore } from '../../store/useVaultStore';
 import { useTabsStore } from '../../store/useTabsStore';
+import { useT } from '../../utils/i18n';
 
 export const QuickSwitcher: React.FC = () => {
+  const t = useT();
   const open = useUIStore((s) => s.searchOpen);
   const close = () => useUIStore.getState().setSearchOpen(false);
   const files = useVaultStore((s) => s.files);
@@ -58,7 +60,7 @@ export const QuickSwitcher: React.FC = () => {
         <input
           ref={inputRef}
           className="qs-input"
-          placeholder="Find file by title, tag, or intent…"
+          placeholder={t({ en: 'Find file by title, tag, or intent…', zh: '按标题、标签或 intent 查找文件…' })}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
@@ -77,7 +79,7 @@ export const QuickSwitcher: React.FC = () => {
         />
         <ul className="qs-results">
           {results.length === 0 && (
-            <li className="qs-empty muted">No matches</li>
+            <li className="qs-empty muted">{t({ en: 'No matches', zh: '无匹配结果' })}</li>
           )}
           {results.map((r, i) => {
             const file = ('file' in r) ? (r as any).file : r;
@@ -96,7 +98,7 @@ export const QuickSwitcher: React.FC = () => {
           })}
         </ul>
         <div className="qs-footer muted">
-          <span>↑↓ navigate · ↵ open · Esc close</span>
+          <span>{t({ en: '↑↓ navigate · ↵ open · Esc close', zh: '↑↓ 选择 · ↵ 打开 · Esc 关闭' })}</span>
         </div>
       </div>
     </div>

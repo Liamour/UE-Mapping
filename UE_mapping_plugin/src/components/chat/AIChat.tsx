@@ -4,10 +4,12 @@ import { checkBackendHealth } from '../../services/vaultApi';
 import { isBridgeAvailable } from '../../services/bridgeApi';
 import { useTabsStore } from '../../store/useTabsStore';
 import { useVaultStore } from '../../store/useVaultStore';
+import { useT } from '../../utils/i18n';
 
 type BackendStatus = 'checking' | 'online' | 'offline';
 
 export const AIChat: React.FC = () => {
+  const t = useT();
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [input, setInput] = useState('');
   const [busy, setBusy] = useState(false);
@@ -49,7 +51,10 @@ export const AIChat: React.FC = () => {
       setBackend('offline');
       setTurns((prev) => [...prev, {
         role: 'assistant',
-        text: `Error: ${e instanceof Error ? e.message : String(e)}`,
+        text: t({
+          en: `Error: ${e instanceof Error ? e.message : String(e)}`,
+          zh: `错误：${e instanceof Error ? e.message : String(e)}`,
+        }),
         ts: Date.now(),
       }]);
     } finally {
@@ -66,29 +71,37 @@ export const AIChat: React.FC = () => {
   return (
     <div className="aichat">
       <div className="aichat-header">
-        <span>AI</span>
+        <span>{t({ en: 'AI', zh: 'AI' })}</span>
         {contextFile && (
           <span className="muted aichat-context">
-            re: {(contextFile.frontmatter.title as string) ?? activeTab?.title}
+            {t({ en: 're:', zh: '关于：' })} {(contextFile.frontmatter.title as string) ?? activeTab?.title}
           </span>
         )}
       </div>
       <div className="aichat-log">
         {turns.length === 0 && backend === 'checking' && (
-          <div className="aichat-empty muted">Checking backend…</div>
+          <div className="aichat-empty muted">{t({ en: 'Checking backend…', zh: '正在检测后端…' })}</div>
         )}
         {turns.length === 0 && backend === 'online' && (
           <div className="aichat-empty muted">
-            Ask anything about the current node. Try: <em>"What does this listen for?"</em>, <em>"Where is the spawn pipeline?"</em>
+            {t({
+              en: 'Ask anything about the current node. Try: "What does this listen for?", "Where is the spawn pipeline?"',
+              zh: '可以提任何关于当前节点的问题。例如："这个节点监听了什么？"、"spawn 流水线在哪里？"',
+            })}
           </div>
         )}
-        {turns.map((t, i) => (
-          <div key={i} className={`aichat-turn aichat-${t.role}`}>
-            <div className="aichat-turn-role">{t.role === 'user' ? 'You' : 'AI'}</div>
-            <div className="aichat-turn-body">{t.text}</div>
+        {turns.map((turn, i) => (
+          <div key={i} className={`aichat-turn aichat-${turn.role}`}>
+            <div className="aichat-turn-role">{turn.role === 'user' ? t({ en: 'You', zh: '你' }) : t({ en: 'AI', zh: 'AI' })}</div>
+            <div className="aichat-turn-body">{turn.text}</div>
           </div>
         ))}
-        {busy && <div className="aichat-turn aichat-assistant"><div className="aichat-turn-role">AI</div><div className="aichat-turn-body muted">…thinking</div></div>}
+        {busy && (
+          <div className="aichat-turn aichat-assistant">
+            <div className="aichat-turn-role">{t({ en: 'AI', zh: 'AI' })}</div>
+            <div className="aichat-turn-body muted">{t({ en: '…thinking', zh: '…思考中' })}</div>
+          </div>
+        )}
       </div>
       <div className="aichat-input">
         <textarea
@@ -101,28 +114,44 @@ export const AIChat: React.FC = () => {
               onSend();
             }
           }}
-          placeholder={backend === 'checking' ? 'Checking backend…' : 'Ask AI… (Ctrl+Enter to send)'}
+          placeholder={backend === 'checking'
+            ? t({ en: 'Checking backend…', zh: '正在检测后端…' })
+            : t({ en: 'Ask AI… (Ctrl+Enter to send)', zh: '提问 AI…（Ctrl+Enter 发送）' })}
           disabled={inputDisabled}
         />
-        <button className="btn-primary" disabled={inputDisabled || !input.trim()} onClick={onSend}>Send</button>
+        <button className="btn-primary" disabled={inputDisabled || !input.trim()} onClick={onSend}>
+          {t({ en: 'Send', zh: '发送' })}
+        </button>
       </div>
     </div>
   );
 };
 
-const BackendOfflineCard: React.FC<{ onRetry: () => void; bridgeMode: boolean }> = ({ onRetry, bridgeMode }) => (
-  <div className="aichat aichat-offline">
-    <div className="aichat-offline-card">
-      <div className="aichat-offline-title">AI Chat needs the Python backend</div>
-      <p className="muted">
-        {bridgeMode
-          ? 'Vault read/write is running through the UE editor bridge, but AI Chat still calls the LLM via the Python backend on http://localhost:8000.'
-          : 'Backend at http://localhost:8000 is not responding.'}
-      </p>
-      <p className="muted aichat-offline-hint">
-        Start it with <code>uvicorn main:app --reload</code> in the <code>backend/</code> directory, then retry.
-      </p>
-      <button className="btn-primary" onClick={onRetry}>Retry connection</button>
+const BackendOfflineCard: React.FC<{ onRetry: () => void; bridgeMode: boolean }> = ({ onRetry, bridgeMode }) => {
+  const t = useT();
+  return (
+    <div className="aichat aichat-offline">
+      <div className="aichat-offline-card">
+        <div className="aichat-offline-title">{t({ en: 'AI Chat needs the Python backend', zh: 'AI 对话需要 Python 后端' })}</div>
+        <p className="muted">
+          {bridgeMode
+            ? t({
+                en: 'Vault read/write is running through the UE editor bridge, but AI Chat still calls the LLM via the Python backend on http://localhost:8000.',
+                zh: 'Vault 的读写已通过 UE 编辑器桥接运行，但 AI 对话仍需通过 http://localhost:8000 的 Python 后端调用 LLM。',
+              })
+            : t({
+                en: 'Backend at http://localhost:8000 is not responding.',
+                zh: 'http://localhost:8000 后端无响应。',
+              })}
+        </p>
+        <p className="muted aichat-offline-hint" dangerouslySetInnerHTML={{
+          __html: t({
+            en: 'Start it with <code>uvicorn main:app --reload</code> in the <code>backend/</code> directory, then retry.',
+            zh: '请在 <code>backend/</code> 目录下运行 <code>uvicorn main:app --reload</code> 启动后端后重试。',
+          }),
+        }} />
+        <button className="btn-primary" onClick={onRetry}>{t({ en: 'Retry connection', zh: '重试连接' })}</button>
+      </div>
     </div>
-  </div>
-);
+  );
+};

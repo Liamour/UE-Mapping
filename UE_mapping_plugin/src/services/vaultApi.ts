@@ -80,8 +80,10 @@ export async function writeVaultNotes(projectRoot: string, relativePath: string,
   return { ok: true };
 }
 
-export async function rebuildBacklinks(projectRoot: string): Promise<unknown> {
-  const url = `${API_BASE}/api/v1/vault/rebuild-backlinks?project_root=${encodeURIComponent(projectRoot)}`;
+export async function rebuildBacklinks(projectRoot: string, language?: 'en' | 'zh'): Promise<unknown> {
+  const params = new URLSearchParams({ project_root: projectRoot });
+  if (language) params.set('language', language);
+  const url = `${API_BASE}/api/v1/vault/rebuild-backlinks?${params.toString()}`;
   const r = await fetch(url, { method: 'POST' });
   if (!r.ok) throw new Error(`rebuild-backlinks HTTP ${r.status}`);
   return r.json();

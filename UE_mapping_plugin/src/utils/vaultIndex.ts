@@ -59,6 +59,8 @@ function subdirToType(sub: string): string {
   if (sub.startsWith('Blueprints')) return 'Blueprint';
   if (sub.startsWith('CPP')) return 'CPP';
   if (sub.startsWith('Interfaces')) return 'Interface';
+  if (sub.startsWith('Components')) return 'Component';
+  if (sub.startsWith('Systems')) return 'System';
   return 'Other';
 }
 
@@ -70,14 +72,16 @@ export interface SystemBucket {
 
 export function groupBySystem(summaries: NodeSummary[]): SystemBucket[] {
   const map = new Map<string, NodeSummary[]>();
-  let untaggedCount = 0;
   for (const s of summaries) {
+    // Skip aggregate System entries — they describe a system, they aren't a
+    // member of one.  Counting them here would create phantom buckets at L0
+    // and pad the L1 force graph with self-referential nodes.
+    if (s.nodeType === 'System') continue;
     if (s.systems.length === 0) {
       const k = '_unassigned';
       const arr = map.get(k) ?? [];
       arr.push(s);
       map.set(k, arr);
-      untaggedCount++;
     } else {
       for (const sys of s.systems) {
         const arr = map.get(sys) ?? [];

@@ -216,15 +216,44 @@ export interface BridgeAssetEntry {
   parent_class: string;
 }
 
+// Function entry surfaced by RequestDeepScan — covers user functions, events,
+// custom events, and dispatchers. `kind` distinguishes them so the UI can
+// pick icons / behaviour per category.
+export interface BridgeFunctionEntry {
+  name: string;
+  kind: 'function' | 'event' | 'custom_event' | 'dispatcher' | string;
+}
+
+// Component entry from the SCS hierarchy. `parent` is empty for root.
+export interface BridgeComponentEntry {
+  name: string;
+  class: string;
+  parent: string;
+}
+
+// One outbound edge from a Blueprint to another Blueprint asset. Engine-class
+// targets (Actor, ActorComponent, etc.) are filtered out on the C++ side.
+export interface BridgeBlueprintEdge {
+  target_asset: string;
+  target_function?: string;
+  kind: 'call' | 'cast' | 'spawn' | 'delegate' | string;
+  from_function: string;
+}
+
 // Result of a single RequestDeepScan call.  ast_hash is a CRC32 fingerprint
 // the orchestrator can compare against the scan-manifest to skip unchanged
-// assets before submitting the batch to the backend.
+// assets before submitting the batch to the backend.  functions / components /
+// edges drive the framework-scan force graph and skeleton .md writer — they
+// are populated by the C++ extractor and require no LLM.
 export interface BridgeDeepScanResult {
   asset_path: string;
   ast_hash: string;
   node_type: string;       // "Blueprint" | "Interface" | "Component"
   name: string;
   parent_class: string;
+  functions?: BridgeFunctionEntry[];
+  components?: BridgeComponentEntry[];
+  edges?: BridgeBlueprintEdge[];
 }
 
 export async function bridgeListBlueprintAssets(projectRoot: string): Promise<BridgeAssetEntry[]> {

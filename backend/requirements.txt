@@ -3,4 +3,6 @@ uvicorn[standard]>=0.32
 pydantic>=2.9
 redis>=5.0
 openai>=1.50
+anthropic>=0.40
+tenacity>=9.0
 pyyaml>=6.0

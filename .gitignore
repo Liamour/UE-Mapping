@@ -28,3 +28,11 @@ Thumbs.db
 .DS_Store
 *.tmp
 *.log
+
+# Scan output / runtime artifacts (per-project vault is generated, not source)
+.aicartographer/
+backend/__pycache__/
+backend/dump_AST_*.json
+
+# Claude Code internals (worktrees, session state)
+.claude/

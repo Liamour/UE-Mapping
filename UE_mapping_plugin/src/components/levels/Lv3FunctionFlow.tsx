@@ -13,6 +13,8 @@ import {
   type BridgeFunctionFlow,
   type BridgeFunctionFlowNode,
 } from '../../services/bridgeApi';
+import { tagNodeTypes, type TagNodeData } from '../graph/TagNode';
+import { useT } from '../../utils/i18n';
 
 interface Props {
   relativePath: string;
@@ -26,6 +28,7 @@ type LoadState =
   | { kind: 'ready'; flow: BridgeFunctionFlow };
 
 export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) => {
+  const t = useT();
   const file = useVaultStore((s) => s.fileCache[relativePath]);
   const loadFile = useVaultStore((s) => s.loadFile);
   const [state, setState] = useState<LoadState>({ kind: 'idle' });
@@ -43,7 +46,10 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
       if (!isFunctionFlowAvailable()) {
         setState({
           kind: 'error',
-          message: 'Function-flow bridge method not bound — rebuild the AICartographer C++ plugin and relaunch UE.',
+          message: t({
+            en: 'Function-flow bridge method not bound — rebuild the AICartographer C++ plugin and relaunch UE.',
+            zh: '函数流桥接方法未绑定 — 请重新编译 AICartographer C++ 插件并重启 UE。',
+          }),
         });
         return;
       }
@@ -70,30 +76,35 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
   }, [state]);
 
   if (!file) {
-    return <div className="empty-state"><p>Loading note…</p></div>;
+    return <div className="empty-state"><p>{t({ en: 'Loading note…', zh: '正在加载笔记…' })}</p></div>;
   }
   if (!assetPath) {
     return (
       <div className="empty-state">
-        <h2>No <code>asset_path</code></h2>
-        <p className="muted">This vault file has no <code>asset_path</code> in its frontmatter, so the function graph cannot be located.</p>
+        <h2>{t({ en: 'No', zh: '缺少' })} <code>asset_path</code></h2>
+        <p className="muted">{t({
+          en: 'This vault file has no asset_path in its frontmatter, so the function graph cannot be located.',
+          zh: '该 vault 文件的 frontmatter 中没有 asset_path，无法定位函数图。',
+        })}</p>
       </div>
     );
   }
   if (state.kind === 'idle' || state.kind === 'loading') {
     return (
       <div className="empty-state">
-        <p className="muted">Loading function flow for <code>{functionId}</code>…</p>
+        <p className="muted">
+          {t({ en: 'Loading function flow for', zh: '正在加载函数流' })} <code>{functionId}</code>…
+        </p>
       </div>
     );
   }
   if (state.kind === 'error') {
     return (
       <div className="empty-state">
-        <h2>Function flow failed</h2>
+        <h2>{t({ en: 'Function flow failed', zh: '函数流加载失败' })}</h2>
         <p className="muted">{state.message}</p>
         <p className="muted" style={{ fontSize: 'var(--fs-xs)' }}>
-          Asset: <code>{assetPath}</code> · Function: <code>{functionId}</code>
+          {t({ en: 'Asset:', zh: '资产：' })} <code>{assetPath}</code> · {t({ en: 'Function:', zh: '函数：' })} <code>{functionId}</code>
         </p>
       </div>
     );
@@ -102,25 +113,58 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
   if (!built || built.nodes.length === 0) {
     return (
       <div className="empty-state">
-        <h2>Function is empty</h2>
-        <p className="muted">No nodes found in <code>{state.flow.graph_name}</code>.</p>
+        <h2>{t({ en: 'Function is empty', zh: '函数为空' })}</h2>
+        <p className="muted">{t({ en: 'No nodes found in', zh: '未在以下图中找到任何节点：' })} <code>{state.flow.graph_name}</code>.</p>
       </div>
     );
   }
+
+  // Build legends from kinds/edges actually present in this function so we
+  // don't show a "K2Node_DynamicCast" swatch for a function that has no casts.
+  const presentKinds = Array.from(new Set(state.flow.nodes.map((n) => n.kind))).sort();
+  const hasExec = state.flow.edges.some((e) => e.isExec);
+  const hasData = state.flow.edges.some((e) => !e.isExec);
 
   return (
     <div className="function-flow">
       <div className="function-flow-header">
         <div>
           <h2>{state.flow.function}</h2>
-          <span className="muted">{state.flow.nodes.length} nodes · {state.flow.edges.length} edges</span>
+          <span className="muted">
+            {t({
+              en: `${state.flow.nodes.length} nodes · ${state.flow.edges.length} edges`,
+              zh: `${state.flow.nodes.length} 个节点 · ${state.flow.edges.length} 条边`,
+            })}
+          </span>
         </div>
         <code className="muted">{relativePath}</code>
+      </div>
+      <div className="function-flow-legend">
+        {presentKinds.map((k) => (
+          <span key={k} className="edge-legend-item">
+            <span className="edge-legend-swatch edge-legend-swatch-node" style={{ background: kindColor(k) }} />
+            {kindLabel(k)}
+          </span>
+        ))}
+        {(hasExec || hasData) && <span className="function-flow-legend-sep" />}
+        {hasExec && (
+          <span className="edge-legend-item">
+            <span className="edge-legend-swatch edge-legend-swatch-line" style={{ background: '#7a3030' }} />
+            {t({ en: 'exec flow', zh: '执行流' })}
+          </span>
+        )}
+        {hasData && (
+          <span className="edge-legend-item">
+            <span className="edge-legend-swatch edge-legend-swatch-line" style={{ background: '#a39f8e' }} />
+            {t({ en: 'data flow', zh: '数据流' })}
+          </span>
+        )}
       </div>
       <div className="function-flow-canvas">
         <ReactFlow
           nodes={built.nodes}
           edges={built.edges}
+          nodeTypes={tagNodeTypes}
           fitView
           fitViewOptions={{ padding: 0.2 }}
           nodesDraggable
@@ -141,15 +185,16 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
 function buildReactFlow(
   rawNodes: BridgeFunctionFlowNode[],
   rawEdges: BridgeFunctionFlow['edges'],
-): { nodes: Node[]; edges: Edge[] } {
-  // UE node coords come straight from the editor — they're roughly in the
-  // same coordinate space as ReactFlow, but each node spans ~280×120 in UE
-  // and we want them tighter. Apply a uniform scale.
-  const SCALE_X = 0.5;
-  const SCALE_Y = 0.6;
+): { nodes: Node<TagNodeData>[]; edges: Edge[] } {
+  // UE node coords come straight from the editor.  We bumped the scale from
+  // 0.5/0.6 → 0.7/0.7 so nodes stay roomier inside ReactFlow's narrower
+  // node-box dimensions, then run a post-pass to nudge any pair that still
+  // overlaps (compiler-generated K2Nodes occasionally share coordinates).
+  const SCALE_X = 0.7;
+  const SCALE_Y = 0.7;
+  const NODE_W  = 200;
+  const NODE_H  = 60;
 
-  // Normalize so the leftmost node sits near x=0 (UE coordinates can be negative
-  // and very large, which makes fitView awkward).
   let minX = Infinity, minY = Infinity;
   for (const n of rawNodes) {
     if (n.x < minX) minX = n.x;
@@ -157,20 +202,49 @@ function buildReactFlow(
   }
   if (!isFinite(minX)) { minX = 0; minY = 0; }
 
-  const nodes: Node[] = rawNodes.map((n) => ({
-    id: n.id,
-    position: { x: (n.x - minX) * SCALE_X, y: (n.y - minY) * SCALE_Y },
-    data: { label: renderLabel(n) },
-    style: {
-      background: kindColor(n.kind),
-      color: '#fff',
-      border: '1px solid var(--border-strong)',
-      borderRadius: 6,
-      padding: '6px 10px',
-      fontSize: 11,
-      boxShadow: 'var(--shadow-sm)',
-      minWidth: 140,
-      maxWidth: 240,
+  const positioned = rawNodes.map((n) => ({
+    raw: n,
+    x: (n.x - minX) * SCALE_X,
+    y: (n.y - minY) * SCALE_Y,
+  }));
+
+  // O(N²) collision relax: two passes are enough for typical function graphs
+  // (≤ 60 nodes).  Anything overlapping gets pushed apart along the axis with
+  // the tighter overlap so we don't shove a tightly-packed exec flow sideways.
+  for (let pass = 0; pass < 2; pass++) {
+    for (let i = 0; i < positioned.length; i++) {
+      for (let j = i + 1; j < positioned.length; j++) {
+        const a = positioned[i];
+        const b = positioned[j];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const overlapX = NODE_W - Math.abs(dx);
+        const overlapY = NODE_H - Math.abs(dy);
+        if (overlapX > 0 && overlapY > 0) {
+          if (overlapX < overlapY) {
+            const push = (overlapX + 8) / 2;
+            const sign = dx >= 0 ? 1 : -1;
+            a.x -= sign * push;
+            b.x += sign * push;
+          } else {
+            const push = (overlapY + 8) / 2;
+            const sign = dy >= 0 ? 1 : -1;
+            a.y -= sign * push;
+            b.y += sign * push;
+          }
+        }
+      }
+    }
+  }
+
+  const nodes: Node<TagNodeData>[] = positioned.map((p) => ({
+    id: p.raw.id,
+    type: 'tag',
+    position: { x: p.x, y: p.y },
+    data: {
+      label: renderLabel(p.raw),
+      tag: kindLabel(p.raw.kind),
+      color: kindColor(p.raw.kind),
     },
   }));
 
@@ -186,6 +260,21 @@ function buildReactFlow(
   }));
 
   return { nodes, edges };
+}
+
+// Human-readable labels for the node-kind legend. Falls back to the raw
+// K2Node class name with the prefix stripped so unfamiliar nodes still read.
+function kindLabel(kind: string): string {
+  switch (kind) {
+    case 'event': return 'event';
+    case 'custom_event': return 'custom event';
+    case 'function_call': return 'function call';
+    case 'K2Node_IfThenElse': return 'branch';
+    case 'K2Node_DynamicCast': return 'cast';
+    case 'K2Node_VariableGet': return 'get var';
+    case 'K2Node_VariableSet': return 'set var';
+    default: return kind.startsWith('K2Node_') ? kind.slice('K2Node_'.length) : kind;
+  }
 }
 
 function renderLabel(n: BridgeFunctionFlowNode): string {

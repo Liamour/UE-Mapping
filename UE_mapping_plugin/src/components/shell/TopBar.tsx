@@ -2,11 +2,15 @@ import React from 'react';
 import { useUIStore } from '../../store/useUIStore';
 import { useVaultStore } from '../../store/useVaultStore';
 import { useTabsStore } from '../../store/useTabsStore';
+import { useT } from '../../utils/i18n';
 
+// TopBar after the ActivityBar refactor: hosts navigation (back), the search
+// trigger (still useful here as a wide chip showing the Ctrl+K hint), the
+// project-root indicator + vault refresh, and the right-pane toggle.
+// Files toggle / Graph view / Settings live on the ActivityBar.
 export const TopBar: React.FC = () => {
-  const setSettingsOpen = useUIStore((s) => s.setSettingsOpen);
+  const t = useT();
   const setSearchOpen = useUIStore((s) => s.setSearchOpen);
-  const toggleLeft = useUIStore((s) => s.toggleLeftPane);
   const toggleRight = useUIStore((s) => s.toggleRightPane);
   const projectRoot = useVaultStore((s) => s.projectRoot);
   const lastLoadedAt = useVaultStore((s) => s.lastLoadedAt);
@@ -19,10 +23,9 @@ export const TopBar: React.FC = () => {
   return (
     <div className="topbar">
       <div className="topbar-left">
-        <button className="iconbtn" title="Toggle left pane" onClick={toggleLeft}>☰</button>
         <button
           className={`iconbtn ${!canGoBack ? 'iconbtn-disabled' : ''}`}
-          title="Go back"
+          title={t({ en: 'Go back', zh: '返回' })}
           onClick={goBack}
           disabled={!canGoBack}
         >←</button>
@@ -32,24 +35,32 @@ export const TopBar: React.FC = () => {
         <button
           className="search-trigger"
           onClick={() => setSearchOpen(true)}
-          title="Quick switcher (Ctrl+K)"
+          title={t({ en: 'Quick switcher (Ctrl+K)', zh: '快速切换 (Ctrl+K)' })}
         >
           <span className="search-icon">⌕</span>
-          <span className="search-hint">Search vault</span>
+          <span className="search-hint">{t({ en: 'Search vault', zh: '搜索 vault' })}</span>
           <span className="search-kbd">Ctrl K</span>
         </button>
       </div>
       <div className="topbar-right">
-        <span className="root-indicator" title={projectRoot || 'No project root set'}>
-          {projectRoot ? truncate(projectRoot, 32) : 'No vault'}
+        <span className="root-indicator" title={projectRoot || t({ en: 'No project root set', zh: '未设置项目根目录' })}>
+          {projectRoot ? truncate(projectRoot, 32) : t({ en: 'No vault', zh: '未加载 vault' })}
         </span>
         <button
           className="iconbtn"
           onClick={() => loadIndex()}
-          title={lastLoadedAt ? `Last loaded ${new Date(lastLoadedAt).toLocaleTimeString()}` : 'Refresh vault'}
+          title={lastLoadedAt
+            ? t({
+                en: `Last loaded ${new Date(lastLoadedAt).toLocaleTimeString()}`,
+                zh: `上次加载于 ${new Date(lastLoadedAt).toLocaleTimeString()}`,
+              })
+            : t({ en: 'Refresh vault', zh: '刷新 vault' })}
         >↻</button>
-        <button className="iconbtn" title="Toggle right pane" onClick={toggleRight}>▤</button>
-        <button className="iconbtn" onClick={() => setSettingsOpen(true)} title="Settings">⚙</button>
+        <button
+          className="iconbtn"
+          title={t({ en: 'Toggle right pane', zh: '切换右侧面板' })}
+          onClick={toggleRight}
+        >▤</button>
       </div>
     </div>
   );

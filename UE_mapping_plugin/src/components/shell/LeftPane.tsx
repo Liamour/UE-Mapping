@@ -2,8 +2,10 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useVaultStore } from '../../store/useVaultStore';
 import { useTabsStore } from '../../store/useTabsStore';
 import { summarize, groupBySystem, nodeColor } from '../../utils/vaultIndex';
+import { useT } from '../../utils/i18n';
 
 export const LeftPane: React.FC = () => {
+  const t = useT();
   const files = useVaultStore((s) => s.files);
   const fileCache = useVaultStore((s) => s.fileCache);
   const loadFile = useVaultStore((s) => s.loadFile);
@@ -59,8 +61,13 @@ export const LeftPane: React.FC = () => {
     return (
       <aside className="leftpane">
         <div className="leftpane-empty">
-          <p>No vault loaded.</p>
-          <p className="muted">Set a project root in <strong>Settings</strong>.</p>
+          <p>{t({ en: 'No vault loaded.', zh: '未加载 vault。' })}</p>
+          <p className="muted" dangerouslySetInnerHTML={{
+            __html: t({
+              en: 'Set a project root in <strong>Settings</strong>.',
+              zh: '请在<strong>设置</strong>中配置项目根目录。',
+            }),
+          }} />
         </div>
       </aside>
     );
@@ -72,7 +79,7 @@ export const LeftPane: React.FC = () => {
         <input
           type="text"
           className="leftpane-search"
-          placeholder="Filter…"
+          placeholder={t({ en: 'Filter…', zh: '筛选…' })}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
@@ -80,20 +87,20 @@ export const LeftPane: React.FC = () => {
           <button
             className={`mode-btn ${groupMode === 'system' ? 'mode-btn-active' : ''}`}
             onClick={() => setGroupMode('system')}
-          >Systems</button>
+          >{t({ en: 'Systems', zh: '系统' })}</button>
           <button
             className={`mode-btn ${groupMode === 'type' ? 'mode-btn-active' : ''}`}
             onClick={() => setGroupMode('type')}
-          >Types</button>
+          >{t({ en: 'Types', zh: '类型' })}</button>
         </div>
       </div>
 
-      {loading && <div className="leftpane-status">Loading…</div>}
+      {loading && <div className="leftpane-status">{t({ en: 'Loading…', zh: '加载中…' })}</div>}
       {error && <div className="leftpane-status leftpane-error">{error}</div>}
       {!loading && !error && summaries.length === 0 && (
         <div className="leftpane-empty">
-          <p>Vault is empty.</p>
-          <p className="muted">Run a scan from UE to populate notes.</p>
+          <p>{t({ en: 'Vault is empty.', zh: 'Vault 为空。' })}</p>
+          <p className="muted">{t({ en: 'Run a scan from UE to populate notes.', zh: '在 UE 中运行扫描以生成笔记。' })}</p>
         </div>
       )}
 
@@ -136,8 +143,9 @@ export const LeftPane: React.FC = () => {
 };
 
 const SystemGroup: React.FC<{ systemId: string; count: number; children: React.ReactNode }> = ({ systemId, count, children }) => {
+  const t = useT();
   const [open, setOpen] = useState(true);
-  const label = systemId === '_unassigned' ? 'Unassigned' : systemId;
+  const label = systemId === '_unassigned' ? t({ en: 'Unassigned', zh: '未归类' }) : systemId;
   return (
     <div className="tree-group">
       <button className="tree-group-header" onClick={() => setOpen(!open)}>

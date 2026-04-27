@@ -20,10 +20,20 @@ public:
     // Synchronously load a Blueprint and return its AST fingerprint plus
     // the metadata needed to assemble a ScanOrchestrator payload.
     // Returns JSON envelope:
-    //   {"ok": true, "asset_path", "ast_hash", "node_type", "name", "parent_class"}
+    //   {
+    //     "ok": true,
+    //     "asset_path", "ast_hash", "node_type", "name", "parent_class",
+    //     "functions": [{"name", "kind"}],          // user functions / events / custom events
+    //     "components": [{"name", "class", "parent"}], // SCS hierarchy
+    //     "edges": [
+    //       {"target_asset", "target_function?", "kind", "from_function"}  // call|cast|spawn|delegate
+    //     ]
+    //   }
     // ast_hash is a CRC32 over the structural fingerprint of every graph (nodes,
     // pins, link topology) — stable across cosmetic/layout changes, sensitive to
     // any topology edit.  Used by the frontend to dedupe against scan-manifest.
+    // The functions/components/edges fields drive the framework-scan force graph
+    // and skeleton .md generation (no LLM required for those).
     UFUNCTION(BlueprintCallable, Category = "AICartographer|DeepScan")
     FString RequestDeepScan(const FString& AssetPath);
 

@@ -1,7 +1,9 @@
 import React from 'react';
 import { useTabsStore } from '../../store/useTabsStore';
+import { useT } from '../../utils/i18n';
 
 export const Tabs: React.FC = () => {
+  const t = useT();
   const tabs = useTabsStore((s) => s.tabs);
   const activeId = useTabsStore((s) => s.activeId);
   const setActive = useTabsStore((s) => s.setActive);
@@ -9,22 +11,22 @@ export const Tabs: React.FC = () => {
 
   return (
     <div className="tabbar">
-      {tabs.map((t) => (
+      {tabs.map((tab) => (
         <div
-          key={t.id}
-          className={`tab ${t.id === activeId ? 'tab-active' : ''}`}
-          onClick={() => setActive(t.id)}
+          key={tab.id}
+          className={`tab ${tab.id === activeId ? 'tab-active' : ''}`}
+          onClick={() => setActive(tab.id)}
         >
-          <span className="tab-icon">{tabIcon(t.location.level)}</span>
-          <span className="tab-title" title={t.title}>{t.title}</span>
+          <span className="tab-icon">{tabIcon(tab.location.level)}</span>
+          <span className="tab-title" title={tab.title}>{tab.title}</span>
           {tabs.length > 1 && (
             <button
               className="tab-close"
               onClick={(e) => {
                 e.stopPropagation();
-                closeTab(t.id);
+                closeTab(tab.id);
               }}
-              title="Close"
+              title={t({ en: 'Close', zh: '关闭' })}
             >×</button>
           )}
         </div>

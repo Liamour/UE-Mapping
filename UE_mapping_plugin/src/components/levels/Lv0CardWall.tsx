@@ -2,8 +2,11 @@ import React, { useEffect, useMemo } from 'react';
 import { useVaultStore } from '../../store/useVaultStore';
 import { useTabsStore } from '../../store/useTabsStore';
 import { summarize, groupBySystem } from '../../utils/vaultIndex';
+import { useT, useLang } from '../../utils/i18n';
 
 export const Lv0CardWall: React.FC = () => {
+  const t = useT();
+  const lang = useLang();
   const projectRoot = useVaultStore((s) => s.projectRoot);
   const files = useVaultStore((s) => s.files);
   const fileCache = useVaultStore((s) => s.fileCache);
@@ -44,14 +47,19 @@ export const Lv0CardWall: React.FC = () => {
   if (!projectRoot) {
     return (
       <div className="empty-state">
-        <h2>Welcome to AICartographer</h2>
-        <p className="muted">Configure a project root in <strong>Settings</strong> to begin exploring your vault.</p>
+        <h2>{t({ en: 'Welcome to AICartographer', zh: '欢迎使用 AICartographer' })}</h2>
+        <p className="muted" dangerouslySetInnerHTML={{
+          __html: t({
+            en: 'Configure a project root in <strong>Settings</strong> to begin exploring your vault.',
+            zh: '请在<strong>设置</strong>中配置项目根目录以开始浏览 vault。',
+          }),
+        }} />
       </div>
     );
   }
 
   if (loading && files.length === 0) {
-    return <div className="empty-state"><p>Loading vault…</p></div>;
+    return <div className="empty-state"><p>{t({ en: 'Loading vault…', zh: '正在加载 vault…' })}</p></div>;
   }
   if (error) {
     return <div className="empty-state"><p className="error">{error}</p></div>;
@@ -59,8 +67,8 @@ export const Lv0CardWall: React.FC = () => {
   if (!loading && files.length === 0) {
     return (
       <div className="empty-state">
-        <h2>Vault is empty</h2>
-        <p className="muted">Run a scan from the UE editor to populate notes.</p>
+        <h2>{t({ en: 'Vault is empty', zh: 'Vault 为空' })}</h2>
+        <p className="muted">{t({ en: 'Run a scan from the UE editor to populate notes.', zh: '从 UE 编辑器中运行扫描以生成笔记。' })}</p>
       </div>
     );
   }
@@ -76,13 +84,13 @@ export const Lv0CardWall: React.FC = () => {
   return (
     <div className="cardwall">
       <div className="cardwall-header">
-        <h1>Project overview</h1>
+        <h1>{t({ en: 'Project overview', zh: '项目总览' })}</h1>
         <div className="cardwall-stats">
-          <Stat label="Files" value={totals.files} />
-          <Stat label="Systems" value={totals.systems} />
-          <Stat label="Blueprints" value={totals.blueprints} />
+          <Stat label={t({ en: 'Files', zh: '文件' })} value={totals.files} />
+          <Stat label={t({ en: 'Systems', zh: '系统' })} value={totals.systems} />
+          <Stat label={t({ en: 'Blueprints', zh: '蓝图' })} value={totals.blueprints} />
           <Stat label="C++" value={totals.cpp} />
-          <Stat label="Interfaces" value={totals.interfaces} />
+          <Stat label={t({ en: 'Interfaces', zh: '接口' })} value={totals.interfaces} />
         </div>
       </div>
 
@@ -94,19 +102,29 @@ export const Lv0CardWall: React.FC = () => {
             <button
               key={b.systemId}
               className="system-card"
-              onClick={() => navigate({ level: 'lv1', systemId: b.systemId }, formatSystem(b.systemId))}
+              onClick={() => navigate({ level: 'lv1', systemId: b.systemId }, formatSystem(b.systemId, lang))}
             >
               <div className="system-card-head">
-                <span className="system-card-title">{formatSystem(b.systemId)}</span>
+                <span className="system-card-title">{formatSystem(b.systemId, lang)}</span>
                 <span className="system-card-count">{b.count}</span>
               </div>
               <ul className="system-card-sample">
-                {sample.map((t, i) => <li key={i}>{t}</li>)}
-                {b.count > sample.length && <li className="muted">…and {b.count - sample.length} more</li>}
+                {sample.map((title, i) => <li key={i}>{title}</li>)}
+                {b.count > sample.length && (
+                  <li className="muted">
+                    {t({
+                      en: `…and ${b.count - sample.length} more`,
+                      zh: `…还有 ${b.count - sample.length} 个`,
+                    })}
+                  </li>
+                )}
               </ul>
               {elevated > 0 && (
                 <div className="system-card-risk">
-                  <span className="risk-dot" /> {elevated} elevated
+                  <span className="risk-dot" /> {t({
+                    en: `${elevated} elevated`,
+                    zh: `${elevated} 个高风险`,
+                  })}
                 </div>
               )}
             </button>
@@ -124,7 +142,7 @@ const Stat: React.FC<{ label: string; value: number }> = ({ label, value }) => (
   </div>
 );
 
-function formatSystem(id: string): string {
-  if (id === '_unassigned') return 'Unassigned';
+function formatSystem(id: string, lang: 'en' | 'zh' = 'en'): string {
+  if (id === '_unassigned') return lang === 'zh' ? '未归类' : 'Unassigned';
   return id.charAt(0).toUpperCase() + id.slice(1);
 }
