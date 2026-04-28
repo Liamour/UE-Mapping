@@ -38,5 +38,8 @@ backend/dump_AST_*.json
 # UE plugin package output (RunUAT BuildPlugin -Package=... default lands here)
 /AICartographer/
 
+# Portable distribution build output (dist/build-release.ps1 lands here)
+/release/
+
 # Claude Code internals (worktrees, session state)
 .claude/

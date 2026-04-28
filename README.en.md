@@ -14,7 +14,7 @@ Fold an entire UE5 project into a clickable, narratable, analyzable map — let 
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=fff)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-[Features](#features) · [Architecture](#architecture) · [Four-Level Views](#four-level-views) · [Quick Start](#quick-start) · [LLM Providers](#llm-providers) · [Development](#development)
+[Features](#features) · [Architecture](#architecture) · [Four-Level Views](#four-level-views) · [Quick Start](#quick-start) · [Portable](#portable-install-recommended) · [LLM Providers](#llm-providers) · [Development](#development)
 
 </div>
 
@@ -131,11 +131,91 @@ Helpers:
 
 ## Quick Start
 
+Two paths:
+
+| You are | Take this | Total time |
+|---|---|---|
+| Just want to use it / send it to a teammate | [**Portable Install**](#portable-install-recommended) — 1.6 MB zip, three `.bat` files | ~10 min |
+| Want to hack on the source | [**Build from Source**](#build-from-source) — clone + npm + pip | ~30 min |
+
+---
+
+## Portable Install (recommended)
+
+> For people who just want it running — no repo clone, no Node, no Memurai. The bundled portable Redis is shipped inside the zip.
+
+### Prerequisites
+
+- Windows 10 / 11
+- **Unreal Engine 5.6+**
+- **Visual Studio 2022** with the "Desktop development with C++" workload — UE compiles the plugin on first project open
+- **Python 3.11+** — make sure to tick "Add Python to PATH" during install ([python.org/downloads](https://www.python.org/downloads/))
+- **LLM API key**: Volcengine endpoint id (`ep-...`) + key, or Anthropic API key
+- **A C++ UE project** as a test bed; if you don't have one, grab the free [Cropout sample](https://www.unrealengine.com/marketplace/en-US/product/cropout-sample-project) from Epic Launcher → Marketplace
+
+### Steps (~10 min)
+
+1. **Get the zip** — download from [GitHub Releases](https://github.com/Liamour/UE-Mapping/releases), or build it yourself:
+   ```powershell
+   git clone https://github.com/Liamour/UE-Mapping.git
+   cd UE-Mapping
+   .\dist\build-release.ps1
+   # → release/AICartographer-Portable-<date>.zip (1.6 MB)
+   ```
+
+2. **Unzip + start the backend** — extract anywhere (e.g. `D:\AICartographer\`), double-click `START.bat`
+   - First run auto-creates a venv and pip-installs deps (1-3 min)
+   - Look for `OK Backend healthy at http://127.0.0.1:8000/api/health`
+   - **Keep this window open** — closing it stops the backend. Press Ctrl+C inside the window to stop cleanly.
+
+3. **Install the plugin into a UE project** — double-click `INSTALL-PLUGIN.bat`
+   - Auto-detects projects under `Documents\Unreal Projects\`; pick a number or paste a `.uproject` path
+   - Copies `plugin/AICartographer/` → `<your project>/Plugins/AICartographer/`
+   - Patches `.uproject` to add the plugin to `Plugins[]` and enable it
+
+4. **First-time open of `.uproject`** — double-click your `.uproject`
+   - UE prompts "Missing Modules" → click **Yes** to rebuild (VS compiles the plugin in the background, 1-2 min)
+   - Blueprint-only projects will first prompt to "Add C++ class" to convert the project (one-time)
+   - UE opens automatically when the build is done
+
+5. **Open the panel + configure** — UE menu `Window` → `Developer Tools` → `Misc` → `AICartographer Web UI`
+   - Top-right gear → **Settings**
+   - **Project root**: the folder containing your `.uproject` (e.g. `D:\MyGame`)
+   - **Language**: English / 简体中文
+   - **LLM Provider**: pick Volcengine or Claude → fill in the key → click **Test connection** (green = good)
+   - Settings → **Run framework scan** (instant, free, writes skeleton `.md`s)
+   - Top bar → **Run project scan** (uses LLM tokens, 30s-few minutes)
+   - Hop into **Lv0** overview → click a system for **Lv1** → click a blueprint for **Lv2** → click a function for **Lv3**
+
+The vault lands in `<your project>/.aicartographer/vault/` and travels with the project under git. Detailed troubleshooting in [INSTALL.md](INSTALL.md) and `README-FIRST.txt` inside the zip.
+
+### What's inside the zip
+
+```
+AICartographer-Portable-<date>/
+├── START.bat                 ← start the backend (double-click)
+├── STOP.bat                  ← stop / clean up leftovers
+├── INSTALL-PLUGIN.bat        ← copy the plugin into a UE project
+├── README-FIRST.txt          ← 5-minute end-user guide
+├── backend/                  ← Python backend source (100 KB)
+├── plugin/AICartographer/    ← UE plugin + prebuilt React WebUI (580 KB)
+├── runtime/redis/            ← portable Redis binaries (2.9 MB)
+└── tools/                    ← launcher.py / install_plugin.py / stop.py
+```
+
+After the first launch a `runtime/python-venv/` directory is created (~150-200 MB) holding fastapi/uvicorn/anthropic/openai etc.
+
+---
+
+## Build from Source
+
+> If you want to hack on the code. If you only want to *use* it, take the portable path above.
+
 ### Prerequisites
 
 - **UE 5.7+** (with the AICartographer plugin built)
 - **Python 3.11+** (3.14 recommended; Windows users: add `C:\Python<ver>\Scripts` to PATH)
-- **Node 20+** (only for frontend dev; the UE webview eats the prebuilt single-file bundle)
+- **Node 20+** (frontend dev; the UE webview eats the prebuilt single-file bundle)
 - **Redis** (task queue; the bundled Win 3.0.504 works via pipeline-HSET workaround)
 - **LLM API key**: a Volcengine ark.cn-beijing.volces.com endpoint id, or an Anthropic API key
 
@@ -187,6 +267,16 @@ npm run build
 4. Settings → **Run framework scan** (no LLM, runs in seconds) → writes skeleton `.md`s
 5. Top bar **Run project scan** (L2 batch + L1 cluster, takes 30s to a few minutes depending on project size)
 6. Hop into Lv0 for the project overview, click a system for Lv1, click a blueprint for Lv2, click a function for Lv3
+
+### Build a portable zip for a teammate
+
+```powershell
+.\dist\build-release.ps1                 # → release/AICartographer-Portable-<date>.zip
+.\dist\build-release.ps1 -Version 1.0.0  # custom version label
+.\dist\build-release.ps1 -NoZip          # folder only, useful for local smoke tests
+```
+
+The build script copies only — it **does not modify** any source. The resulting zip is 1.6 MB (3.6 MB unpacked).
 
 ---
 

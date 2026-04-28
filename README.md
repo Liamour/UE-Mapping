@@ -14,7 +14,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=fff)](https://fastapi.tiangolo.com/)
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 
-[功能特性](#功能特性) · [架构](#架构) · [四级视图](#四级视图) · [快速开始](#快速开始) · [LLM 厂商](#llm-厂商支持) · [开发](#开发)
+[功能特性](#功能特性) · [架构](#架构) · [四级视图](#四级视图) · [快速开始](#快速开始) · [便携包](#便携包安装推荐) · [LLM 厂商](#llm-厂商支持) · [开发](#开发)
 
 </div>
 
@@ -131,12 +131,92 @@ graph TB
 
 ## 快速开始
 
+两条路径：
+
+| 你是 | 走哪条 | 总耗时 |
+|---|---|---|
+| 想直接用 / 把它发给同事 | [**便携包安装**](#便携包安装推荐) — 1.6 MB zip，三个 `.bat` | ~10 min |
+| 想改源码 / 二次开发 | [**从源码构建**](#从源码构建) — 克隆仓库 + npm + pip | ~30 min |
+
+---
+
+## 便携包安装（推荐）
+
+> 给"只想用上"的同事 — 不需要克隆仓库、不需要装 Node、不需要装 Memurai。仓库自带的便携 Redis 直接打进 zip。
+
+### 前置
+
+- Windows 10 / 11
+- **Unreal Engine 5.6+**
+- **Visual Studio 2022**（带"使用 C++ 的桌面开发"工作负载） — UE 第一次开项目时用它编插件
+- **Python 3.11+** — 安装时务必勾 "Add Python to PATH"（[python.org/downloads](https://www.python.org/downloads/)）
+- **LLM API key**：Volcengine endpoint id（`ep-...`）+ key，或 Anthropic API key
+- **一个 UE C++ 项目**作为测试床；没有可在 Epic Launcher → Marketplace 免费下载 [Cropout sample](https://www.unrealengine.com/marketplace/en-US/product/cropout-sample-project)
+
+### 步骤（约 10 分钟）
+
+1. **拿到 zip** — 从 [GitHub Releases](https://github.com/Liamour/UE-Mapping/releases) 下，或自己构建：
+   ```powershell
+   git clone https://github.com/Liamour/UE-Mapping.git
+   cd UE-Mapping
+   .\dist\build-release.ps1
+   # → release/AICartographer-Portable-<日期>.zip (1.6 MB)
+   ```
+
+2. **解压 + 启动后端** — 解压到任意目录（比如 `D:\AICartographer\`），双击 `START.bat`
+   - 首次自动建 venv + pip install（1-3 分钟）
+   - 看到 `OK Backend healthy at http://127.0.0.1:8000/api/health` 就成功了
+   - **这个窗口别关** — 关了后端就停了。要停服务在窗口里按 Ctrl+C
+
+3. **装插件到 UE 项目** — 双击 `INSTALL-PLUGIN.bat`
+   - 自动列出 `Documents\Unreal Projects\` 下的项目，选编号或粘贴 `.uproject` 路径
+   - 脚本拷 `plugin/AICartographer/` → `<你项目>/Plugins/AICartographer/`
+   - 自动改 `.uproject` 把插件加到 `Plugins[]` 并启用
+
+4. **第一次打开 .uproject** — 双击 `.uproject` 文件
+   - UE 弹 "Missing Modules" 对话框 → 点 **Yes** 让它编插件（VS 后台跑 1-2 分钟）
+   - Blueprint-only 项目会先弹"Add C++ class"引导转 C++（一次性）
+   - 编完 UE 自动打开
+
+5. **打开面板 + 配置** — UE 菜单 `Window` → `Developer Tools` → `Misc` → `AICartographer Web UI`
+   - 右上角齿轮 → **Settings**
+   - **Project root**：填 `.uproject` 所在文件夹（比如 `D:\MyGame`）
+   - **Language**：English / 简体中文
+   - **LLM Provider**：选 Volcengine 或 Claude → 填 key → 点 **Test connection** 看绿灯
+   - Settings → **Run framework scan**（秒级、不烧钱、写出骨架 .md）
+   - 顶栏 → **Run project scan**（吃 LLM 配额，30 秒~几分钟）
+   - 完成后进 **Lv0** 总览 → 点系统进 **Lv1** → 点蓝图进 **Lv2** → 点函数进 **Lv3**
+
+扫完后 vault 落在 `<你项目>/.aicartographer/vault/` 下，git 跟随项目走。详细排错见 [INSTALL.md](INSTALL.md) 和便携包内的 `README-FIRST.txt`。
+
+### 便携包目录结构
+
+```
+AICartographer-Portable-<日期>/
+├── START.bat                 ← 启动后端（双击）
+├── STOP.bat                  ← 停止 / 清理残留
+├── INSTALL-PLUGIN.bat        ← 拷插件到一个 UE 项目
+├── README-FIRST.txt          ← 给终端用户的 5 分钟指南
+├── backend/                  ← Python 后端源码（100 KB）
+├── plugin/AICartographer/    ← UE 插件 + 预编译 React WebUI（580 KB）
+├── runtime/redis/            ← 便携 Redis 二进制（2.9 MB）
+└── tools/                    ← launcher.py / install_plugin.py / stop.py
+```
+
+首次启动后会多出 `runtime/python-venv/`（约 150-200 MB），存 fastapi/uvicorn/anthropic/openai 等依赖。
+
+---
+
+## 从源码构建
+
+> 想 hack 代码 / 二次开发走这条。如果只是用，请走上面的便携包。
+
 ### 前置条件
 
 - **UE 5.7+**（构建好 AICartographer 插件）
 - **Python 3.11+**（推荐 3.14；Win 用户注意 PATH 配 `C:\Python<ver>\Scripts`）
-- **Node 20+**（仅开发前端时需要；UE webview 直接吃 build 好的单文件 bundle）
-- **Redis**（用于任务队列；Win 自带的 3.0.504 已通过 pipeline-HSET 兼容）
+- **Node 20+**（开发前端用；UE webview 直接吃 build 好的单文件 bundle）
+- **Redis**（任务队列；Win 自带的 3.0.504 已通过 pipeline-HSET 兼容）
 - **LLM API key**：Volcengine ark.cn-beijing.volces.com endpoint id，或 Anthropic API key
 
 ### 1. 克隆 + 拉依赖
@@ -187,6 +267,16 @@ npm run build
 4. Settings → **Run framework scan**（无 LLM，秒级）→ 写出骨架 .md
 5. 顶栏 **Run project scan**（L2 batch + L1 cluster，根据项目大小 30s ~ 几分钟）
 6. 进 Lv0 看项目总览，点系统进 Lv1，点蓝图进 Lv2，点函数进 Lv3
+
+### 打一份便携包发给同事
+
+```powershell
+.\dist\build-release.ps1                 # → release/AICartographer-Portable-<日期>.zip
+.\dist\build-release.ps1 -Version 1.0.0  # 自定义版本号
+.\dist\build-release.ps1 -NoZip          # 只生成目录，方便本地测
+```
+
+打包脚本只做拷贝，**不修改源码**。生成的 zip 是 1.6 MB，解压 3.6 MB。
 
 ---
 
