@@ -3,6 +3,7 @@ import { useVaultStore } from '../../store/useVaultStore';
 import { useTabsStore } from '../../store/useTabsStore';
 import { useLLMStore } from '../../store/useLLMStore';
 import { useUIStore } from '../../store/useUIStore';
+import { useStaleStore } from '../../store/useStaleStore';
 import { MiniMarkdown } from '../../utils/miniMarkdown';
 import type { VaultEdge } from '../../utils/frontmatter';
 import { NotesEditor } from '../notes/NotesEditor';
@@ -27,6 +28,8 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen);
   const getProviderConfig = useLLMStore((s) => s.getProviderConfig);
   const llmProvider = useLLMStore((s) => s.provider);
+  const removeStalePath = useStaleStore((s) => s.removePath);
+  const stalePaths = useStaleStore((s) => s.stalePaths);
 
   useEffect(() => {
     if (!file) loadFile(relativePath);
@@ -112,6 +115,9 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
       invalidateFile(relativePath);
       await loadFile(relativePath);
       setDeepState({ kind: 'done', result });
+      // Single-node scan resolves staleness for this asset.
+      const apForClear = (file.frontmatter.asset_path as string) ?? '';
+      if (apForClear) removeStalePath(apForClear);
     } catch (e) {
       setDeepState({ kind: 'error', message: e instanceof Error ? e.message : String(e) });
     }
@@ -128,6 +134,8 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
   const dispatchers = (fm.exports_dispatchers ?? []) as string[];
   const variables = (fm.variables ?? []) as Array<Record<string, unknown>>;
   const analysisState = (fm.analysis_state as string | undefined) ?? 'skeleton';
+  const assetPathForStale = (fm.asset_path as string) ?? '';
+  const isCurrentStale = !!assetPathForStale && stalePaths.has(assetPathForStale);
 
   return (
     <div className="bp-focus">
@@ -143,6 +151,11 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
                 ? t({ en: 'LLM analyzed', zh: '已 LLM 分析' })
                 : t({ en: 'skeleton', zh: '骨架' })}
             </Pill>
+            {isCurrentStale && (
+              <Pill kind="risk-warning">
+                {t({ en: '⚠ stale (changed in editor)', zh: '⚠ 已变更（编辑器中改动）' })}
+              </Pill>
+            )}
           </div>
           <div className="bp-focus-deep">
             <button

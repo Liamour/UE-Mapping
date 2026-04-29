@@ -7,6 +7,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useVaultStore } from '../../store/useVaultStore';
+import { useStaleStore } from '../../store/useStaleStore';
 import {
   bridgeReadFunctionFlow,
   bridgeOpenInEditor,
@@ -33,6 +34,7 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
   const t = useT();
   const file = useVaultStore((s) => s.fileCache[relativePath]);
   const loadFile = useVaultStore((s) => s.loadFile);
+  const stalePaths = useStaleStore((s) => s.stalePaths);
   const [state, setState] = useState<LoadState>({ kind: 'idle' });
 
   useEffect(() => {
@@ -142,7 +144,30 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
     <div className="function-flow">
       <div className="function-flow-header">
         <div>
-          <h2>{state.flow.function}</h2>
+          <h2 style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            {state.flow.function}
+            {!!assetPath && stalePaths.has(assetPath) && (
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  padding: '2px 8px',
+                  borderRadius: 10,
+                  background: 'rgba(204, 132, 30, 0.18)',
+                  color: '#cc841e',
+                  fontSize: 'var(--fs-xs)',
+                  fontWeight: 600,
+                  border: '1px solid rgba(204, 132, 30, 0.35)',
+                }}
+                title={t({
+                  en: 'This blueprint changed in the UE editor since last scan — function flow may be out of date',
+                  zh: '自上次扫描以来此蓝图在 UE 编辑器中变更 — 函数流可能已过期',
+                })}
+              >
+                {t({ en: '⚠ stale', zh: '⚠ 已变更' })}
+              </span>
+            )}
+          </h2>
           <span className="muted">
             {t({
               en: `${state.flow.nodes.length} nodes · ${state.flow.edges.length} edges`,

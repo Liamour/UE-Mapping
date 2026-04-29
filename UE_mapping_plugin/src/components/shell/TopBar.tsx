@@ -2,6 +2,7 @@ import React from 'react';
 import { useUIStore } from '../../store/useUIStore';
 import { useVaultStore } from '../../store/useVaultStore';
 import { useTabsStore } from '../../store/useTabsStore';
+import { useStaleStore } from '../../store/useStaleStore';
 import { useT } from '../../utils/i18n';
 
 // TopBar after the ActivityBar refactor: hosts navigation (back), the search
@@ -17,6 +18,7 @@ export const TopBar: React.FC = () => {
   const loadIndex = useVaultStore((s) => s.loadIndex);
   const goBack = useTabsStore((s) => s.goBackActive);
   const activeTab = useTabsStore((s) => s.tabs.find((t) => t.id === s.activeId));
+  const staleCount = useStaleStore((s) => s.stalePaths.size);
 
   const canGoBack = (activeTab?.history.length ?? 0) > 0;
 
@@ -43,6 +45,29 @@ export const TopBar: React.FC = () => {
         </button>
       </div>
       <div className="topbar-right">
+        {staleCount > 0 && (
+          <span
+            className="topbar-stale-badge"
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 4,
+              padding: '2px 8px',
+              borderRadius: 10,
+              background: 'rgba(204, 132, 30, 0.18)',
+              color: '#cc841e',
+              fontSize: 'var(--fs-xs)',
+              fontWeight: 600,
+              border: '1px solid rgba(204, 132, 30, 0.35)',
+            }}
+            title={t({
+              en: `${staleCount} asset(s) changed in editor since last scan — vault notes may be stale`,
+              zh: `自上次扫描以来 ${staleCount} 个资产在编辑器中变更 — vault 笔记可能已过期`,
+            })}
+          >
+            ⚠ {staleCount}
+          </span>
+        )}
         <span className="root-indicator" title={projectRoot || t({ en: 'No project root set', zh: '未设置项目根目录' })}>
           {projectRoot ? truncate(projectRoot, 32) : t({ en: 'No vault', zh: '未加载 vault' })}
         </span>

@@ -11,6 +11,7 @@ import { QuickSwitcher } from '../search/QuickSwitcher';
 import { useTabsStore } from '../../store/useTabsStore';
 import { useUIStore } from '../../store/useUIStore';
 import { useVaultStore } from '../../store/useVaultStore';
+import { startStaleSync, stopStaleSync } from '../../services/staleSync';
 import { Lv0CardWall } from '../levels/Lv0CardWall';
 import { Lv1SystemGraph } from '../levels/Lv1SystemGraph';
 import { Lv1SystemMarkdown } from '../levels/Lv1SystemMarkdown';
@@ -45,6 +46,13 @@ export const AppShell: React.FC = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [setSearchOpen]);
+
+  // Stale-asset polling lifecycle (HANDOFF §20.4 P1).  Hits the bridge
+  // every 30s; no-ops gracefully when the bridge isn't bound.
+  useEffect(() => {
+    startStaleSync();
+    return () => stopStaleSync();
+  }, []);
 
   return (
     <div className="appshell">
