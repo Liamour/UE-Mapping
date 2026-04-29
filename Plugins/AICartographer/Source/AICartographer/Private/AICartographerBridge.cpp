@@ -21,6 +21,8 @@
 #include "Misc/Paths.h"
 #include "Misc/Crc.h"
 #include "GenericPlatform/GenericPlatformFile.h"
+#include "Editor.h"
+#include "Subsystems/AssetEditorSubsystem.h"
 
 // File-scope JSON helpers — shared by every UFUNCTION body and helper namespace
 // in this translation unit.  Hoisted out so the deep-scan code (defined before
@@ -274,10 +276,25 @@ namespace
     }
 
     // Coarse classification matching the backend's ASTNodePayload.node_type enum.
+    // Order matters: BlueprintType (Interface / FunctionLibrary / MacroLibrary)
+    // wins over class-name; Widget/Anim are detected by class to avoid touching
+    // BPTYPE_* enum values that may differ across UE versions.
     static FString ClassifyBlueprintNodeType(UBlueprint* BP)
     {
         if (!BP) return TEXT("Blueprint");
         if (BP->BlueprintType == BPTYPE_Interface) return TEXT("Interface");
+        if (BP->BlueprintType == BPTYPE_FunctionLibrary) return TEXT("FunctionLibrary");
+        if (BP->BlueprintType == BPTYPE_MacroLibrary) return TEXT("MacroLibrary");
+
+        // Widget / Anim BPs are real UBlueprint subclasses (UWidgetBlueprint /
+        // UAnimBlueprint).  Compare by class name so we don't pull in UMG /
+        // AnimGraph headers just for an isa check.
+        if (UClass* Cls = BP->GetClass())
+        {
+            const FString ClsName = Cls->GetName();
+            if (ClsName == TEXT("WidgetBlueprint")) return TEXT("WidgetBlueprint");
+            if (ClsName == TEXT("AnimBlueprint")) return TEXT("AnimBlueprint");
+        }
 
         UClass* Parent = BP->ParentClass;
         if (Parent)
@@ -532,17 +549,27 @@ FString UAICartographerBridge::RequestDeepScan(const FString& AssetPath)
     if (AssetDataList.Num() == 0)
         return MakeErrorJson(FString::Printf(TEXT("no asset at package path: %s"), *PackageName));
 
+    // Accept every blueprint flavour the AssetRegistry filter in
+    // ListBlueprintAssets pulls in.  Keep this set in sync with that filter.
+    static const TSet<FName> kAcceptedBPClasses = {
+        FName("Blueprint"),
+        FName("WidgetBlueprint"),
+        FName("EditorUtilityWidgetBlueprint"),
+        FName("AnimBlueprint"),
+        FName("BlueprintFunctionLibrary"),
+        FName("BlueprintMacroLibrary"),
+    };
     bool bIsBlueprint = false;
     for (const FAssetData& Asset : AssetDataList)
     {
-        if (Asset.AssetClassPath.GetAssetName() == TEXT("Blueprint"))
+        if (kAcceptedBPClasses.Contains(Asset.AssetClassPath.GetAssetName()))
         {
             bIsBlueprint = true;
             break;
         }
     }
     if (!bIsBlueprint)
-        return MakeErrorJson(FString::Printf(TEXT("asset is not a Blueprint: %s"), *PackageName));
+        return MakeErrorJson(FString::Printf(TEXT("asset is not a Blueprint-like type: %s"), *PackageName));
 
     UBlueprint* LoadedBP = LoadObject<UBlueprint>(nullptr, *CleanPath);
     if (!LoadedBP)
@@ -599,9 +626,32 @@ FString UAICartographerBridge::ListBlueprintAssets(const FString& ProjectRoot)
     FARFilter Filter;
     Filter.PackagePaths.Add(FName("/Game"));
     Filter.bRecursivePaths = true;
+    // Pick up every Blueprint flavour the user might author.  Each BP variant
+    // is its own UClass living in a different module — Blueprint in /Engine,
+    // WidgetBlueprint in /UMG, AnimBlueprint in /Engine, etc.  Without these
+    // entries the AssetRegistry filter silently drops them and the user's
+    // UI / animation / library blueprints never make it into the scan pool.
     Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("Blueprint")));
+    Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/UMG"), TEXT("WidgetBlueprint")));
+    Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("AnimBlueprint")));
+    Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("BlueprintFunctionLibrary")));
+    Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("BlueprintMacroLibrary")));
     Filter.bIncludeOnlyOnDiskAssets = true;
+    Filter.bRecursiveClasses = true; // Pick up subclasses (e.g. EditorUtilityWidgetBlueprint)
     AssetRegistryModule.Get().GetAssets(Filter, AssetDataList);
+
+    // Class names accepted as "blueprint-like" — must mirror the ClassPaths
+    // above (plus subclasses we explicitly want).  AssetClassPath holds the
+    // actual stored class for each asset; recursive filter pulls in things
+    // like EditorUtilityWidgetBlueprint which we still want listed.
+    static const TSet<FName> kAcceptedClassNames = {
+        FName("Blueprint"),
+        FName("WidgetBlueprint"),
+        FName("EditorUtilityWidgetBlueprint"),
+        FName("AnimBlueprint"),
+        FName("BlueprintFunctionLibrary"),
+        FName("BlueprintMacroLibrary"),
+    };
 
     TArray<TSharedPtr<FJsonValue>> Assets;
     Assets.Reserve(AssetDataList.Num());
@@ -609,7 +659,7 @@ FString UAICartographerBridge::ListBlueprintAssets(const FString& ProjectRoot)
     for (const FAssetData& Asset : AssetDataList)
     {
         if (!Asset.IsValid()) continue;
-        if (Asset.AssetClassPath.GetAssetName() != TEXT("Blueprint")) continue;
+        if (!kAcceptedClassNames.Contains(Asset.AssetClassPath.GetAssetName())) continue;
 
         FString TrueAssetPath = Asset.GetObjectPathString();
         if (TrueAssetPath.EndsWith(TEXT("/")) || !TrueAssetPath.Contains(TEXT("."))) continue;
@@ -649,6 +699,94 @@ FString UAICartographerBridge::ListBlueprintAssets(const FString& ProjectRoot)
 FString UAICartographerBridge::PingBridge()
 {
     return TEXT("ONLINE");
+}
+
+// Open the Blueprint editor for AssetPath, optionally focused on a function
+// graph.  Path purification mirrors RequestDeepScan so the JS side can pass
+// either /Game/X or /Game/X.X — both forms resolve to the same asset.
+FString UAICartographerBridge::OpenInEditor(const FString& AssetPath, const FString& FunctionName)
+{
+    UE_LOG(LogTemp, Warning, TEXT("[BRIDGE] OpenInEditor: %s fn=%s"), *AssetPath, *FunctionName);
+
+    if (!GEditor)
+        return MakeErrorJson(TEXT("editor unavailable (running headless?)"));
+
+    // Reuse the same /Game/ path-purification logic as RequestDeepScan
+    auto PurifyGamePath = [](const FString& InAssetPath) -> FString
+    {
+        FString Clean = InAssetPath;
+        const int32 GameIdx = Clean.Find(TEXT("/Game/"));
+        if (GameIdx == INDEX_NONE) return FString();
+        Clean = Clean.RightChop(GameIdx);
+        // Ensure ObjectName format: /Game/Path/X.X
+        if (!Clean.Contains(TEXT(".")))
+        {
+            int32 SlashIdx;
+            if (Clean.FindLastChar('/', SlashIdx))
+            {
+                Clean = Clean + TEXT(".") + Clean.RightChop(SlashIdx + 1);
+            }
+        }
+        return Clean;
+    };
+
+    const FString CleanPath = PurifyGamePath(AssetPath);
+    if (CleanPath.IsEmpty())
+        return MakeErrorJson(FString::Printf(TEXT("invalid asset path (missing /Game/): %s"), *AssetPath));
+
+    UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *CleanPath);
+    if (!BP)
+        return MakeErrorJson(FString::Printf(TEXT("LoadObject failed: %s"), *CleanPath));
+
+    UAssetEditorSubsystem* Subsys = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>();
+    if (!Subsys)
+        return MakeErrorJson(TEXT("AssetEditorSubsystem unavailable"));
+
+    // Open the BP editor.  bFocusIfOpen=true brings an existing tab forward
+    // instead of opening a duplicate.
+    Subsys->OpenEditorForAsset(BP);
+
+    // If the caller asked for a specific function graph, look it up and open
+    // the graph asset directly — this triggers the BP editor's "open this
+    // graph in a tab" path without us needing to talk to FBlueprintEditor.
+    bool bFocusedFunction = false;
+    if (!FunctionName.IsEmpty())
+    {
+        UEdGraph* TargetGraph = nullptr;
+        for (UEdGraph* G : BP->FunctionGraphs)
+        {
+            if (G && G->GetName() == FunctionName) { TargetGraph = G; break; }
+        }
+        if (!TargetGraph)
+        {
+            for (UEdGraph* G : BP->UbergraphPages)
+            {
+                if (G && G->GetName() == FunctionName) { TargetGraph = G; break; }
+            }
+        }
+        if (!TargetGraph)
+        {
+            for (UEdGraph* G : BP->MacroGraphs)
+            {
+                if (G && G->GetName() == FunctionName) { TargetGraph = G; break; }
+            }
+        }
+        if (TargetGraph)
+        {
+            Subsys->OpenEditorForAsset(TargetGraph);
+            bFocusedFunction = true;
+        }
+    }
+
+    TSharedRef<FJsonObject> Root = MakeShareable(new FJsonObject());
+    Root->SetBoolField(TEXT("ok"), true);
+    Root->SetStringField(TEXT("asset_path"), CleanPath);
+    if (!FunctionName.IsEmpty())
+    {
+        Root->SetStringField(TEXT("function"), FunctionName);
+        Root->SetBoolField(TEXT("focused_function"), bFocusedFunction);
+    }
+    return SerializeJson(Root);
 }
 
 // ---------------------------------------------------------------------------

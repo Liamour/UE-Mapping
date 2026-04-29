@@ -20,6 +20,8 @@ interface AICartographerBridge {
   writevaultfile?: (projectRoot: string, relativePath: string, content: string) => Promise<string> | string;
 
   readblueprintfunctionflow?: (assetPath: string, functionName: string) => Promise<string> | string;
+
+  openineditor?: (assetPath: string, functionName: string) => Promise<string> | string;
 }
 
 declare global {
@@ -275,4 +277,34 @@ export async function bridgeRequestDeepScan(assetPath: string): Promise<BridgeDe
 export function isDeepScanAvailable(): boolean {
   const b = getBridge();
   return typeof b?.requestdeepscan === 'function' && typeof b?.listblueprintassets === 'function';
+}
+
+// ---- "Jump to UE editor" bridge --------------------------------------------
+// Opens the Blueprint editor for `assetPath`.  When `functionName` is given,
+// also opens that specific function graph in a tab (matches the L2/L3 view
+// the user clicked from).  Requires a C++ rebuild — older plugin binaries
+// won't have `openineditor` bound and this throws a helpful error.
+
+export interface BridgeOpenInEditorResult {
+  ok: true;
+  asset_path: string;
+  function?: string;
+  focused_function?: boolean;
+}
+
+export async function bridgeOpenInEditor(
+  assetPath: string,
+  functionName: string = '',
+): Promise<BridgeOpenInEditorResult> {
+  const b = getBridge();
+  if (!b?.openineditor) throw new Error('openineditor not bound (rebuild C++ plugin)');
+  return callBridgeJSON<BridgeOpenInEditorResult>(
+    b.openineditor(assetPath, functionName),
+    'openineditor',
+  );
+}
+
+export function isOpenInEditorAvailable(): boolean {
+  const b = getBridge();
+  return typeof b?.openineditor === 'function';
 }

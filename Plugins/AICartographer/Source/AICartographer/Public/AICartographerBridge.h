@@ -78,6 +78,15 @@ public:
     UFUNCTION(BlueprintCallable, Category = "AICartographer|DeepScan")
     FString ReadBlueprintFunctionFlow(const FString& AssetPath, const FString& FunctionName);
 
+    // Open the Blueprint editor for AssetPath (and optionally focus a specific
+    // function graph by name).  FunctionName="" opens the asset's default tab
+    // (event graph for actor BPs, designer for widgets, etc).  The frontend
+    // calls this from Lv2 / Lv3 "Jump to UE" buttons so users can flip from
+    // analysis to authoring without alt-tabbing.
+    // Returns: {"ok": true, "asset_path": "..."} or {"ok": false, "error": "..."}
+    UFUNCTION(BlueprintCallable, Category = "AICartographer|Bridge")
+    FString OpenInEditor(const FString& AssetPath, const FString& FunctionName);
+
 private:
     // 节点净化为AST JSON格式
     TSharedPtr<class FJsonObject> PurifyNodeToAST(class UEdGraphNode* Node);

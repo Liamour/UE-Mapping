@@ -9,7 +9,9 @@ import 'reactflow/dist/style.css';
 import { useVaultStore } from '../../store/useVaultStore';
 import {
   bridgeReadFunctionFlow,
+  bridgeOpenInEditor,
   isFunctionFlowAvailable,
+  isOpenInEditorAvailable,
   type BridgeFunctionFlow,
   type BridgeFunctionFlowNode,
 } from '../../services/bridgeApi';
@@ -125,6 +127,17 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
   const hasExec = state.flow.edges.some((e) => e.isExec);
   const hasData = state.flow.edges.some((e) => !e.isExec);
 
+  const canOpenInUE = isOpenInEditorAvailable();
+  const onOpenInUE = async () => {
+    if (!assetPath) return;
+    try {
+      await bridgeOpenInEditor(assetPath, functionId);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn('[OpenInEditor]', e);
+    }
+  };
+
   return (
     <div className="function-flow">
       <div className="function-flow-header">
@@ -137,7 +150,21 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
             })}
           </span>
         </div>
-        <code className="muted">{relativePath}</code>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          {canOpenInUE && (
+            <button
+              className="btn-text"
+              onClick={onOpenInUE}
+              title={t({
+                en: 'Open this function graph in the UE Blueprint editor',
+                zh: '在 UE 蓝图编辑器中打开此函数图',
+              })}
+            >
+              {t({ en: '↗ Open in UE', zh: '↗ 在 UE 中打开' })}
+            </button>
+          )}
+          <code className="muted">{relativePath}</code>
+        </div>
       </div>
       <div className="function-flow-legend">
         {presentKinds.map((k) => (

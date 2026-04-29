@@ -96,6 +96,13 @@ NODE_TYPE_TO_SUBDIR = {
     "C++": "CPP",
     "Interface": "Interfaces",
     "Component": "Blueprints",
+    # New blueprint flavours surfaced by the C++ bridge after the WBP/AnimBP
+    # filter widening (§15.2 #2).  Each gets its own subdir so the file tree
+    # groups them naturally; the underlying frontmatter schema is identical.
+    "WidgetBlueprint": "Widgets",
+    "AnimBlueprint": "Anims",
+    "FunctionLibrary": "Libraries",
+    "MacroLibrary": "Libraries",
 }
 
 
@@ -157,7 +164,7 @@ def node_file_path(project_root: str, node: NodeRecord) -> Path:
 def ensure_vault_layout(project_root: str, default_vocab_src: Optional[Path] = None) -> Path:
     """Create vault dir tree on first run. Returns vault root path."""
     root = vault_root(project_root)
-    for sub in ("Blueprints", "CPP", "Interfaces", "_systems", "_meta"):
+    for sub in ("Blueprints", "CPP", "Interfaces", "Widgets", "Anims", "Libraries", "_systems", "_meta"):
         (root / sub).mkdir(parents=True, exist_ok=True)
 
     # Copy default vocabulary if not present

@@ -7,6 +7,8 @@ import { MiniMarkdown } from '../../utils/miniMarkdown';
 import type { VaultEdge } from '../../utils/frontmatter';
 import { NotesEditor } from '../notes/NotesEditor';
 import { postSingleScan, type SingleScanResponse } from '../../services/scanApi';
+import { buildScanNodeFromFrontmatter } from '../../services/scanPayload';
+import { bridgeOpenInEditor, isOpenInEditorAvailable } from '../../services/bridgeApi';
 import { useT } from '../../utils/i18n';
 
 interface Props {
@@ -56,6 +58,27 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
     | { kind: 'error'; message: string };
   const [deepState, setDeepState] = useState<DeepState>({ kind: 'idle' });
 
+  // "Jump to UE" — opens the BP editor for this asset.  Hidden when the
+  // bridge is unavailable (HTTP-only mode) or the C++ binary is too old to
+  // have OpenInEditor bound.
+  const [openState, setOpenState] = useState<{ kind: 'idle' } | { kind: 'error'; message: string }>({ kind: 'idle' });
+  const canOpenInUE = isOpenInEditorAvailable();
+  const onOpenInUE = async () => {
+    if (!file) return;
+    const fmLocal = file.frontmatter;
+    const assetPath = (fmLocal.asset_path as string) ?? '';
+    if (!assetPath) {
+      setOpenState({ kind: 'error', message: t({ en: 'No asset_path in frontmatter.', zh: 'frontmatter 中缺少 asset_path。' }) });
+      return;
+    }
+    try {
+      await bridgeOpenInEditor(assetPath, '');
+      setOpenState({ kind: 'idle' });
+    } catch (e) {
+      setOpenState({ kind: 'error', message: e instanceof Error ? e.message : String(e) });
+    }
+  };
+
   const runDeepReasoning = async () => {
     const cfg = getProviderConfig();
     if (!cfg) {
@@ -75,27 +98,13 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
     if (!file) return;
     setDeepState({ kind: 'running' });
     try {
-      const fmLocal = file.frontmatter;
+      // Single source of truth: build the LLM payload from the existing
+      // frontmatter through the shared helper.  This keeps batch and
+      // single-node scans in sync — same ast_data shape, same edge
+      // vocabulary, and (critically) outbound_edges is now populated so the
+      // vault writer preserves the `edges:` block on rerun.  See §15.7.
       const result = await postSingleScan({
-        node: {
-          node_id: (fmLocal.title as string) ?? relativePath,
-          asset_path: (fmLocal.asset_path as string) ?? '',
-          title: (fmLocal.title as string) ?? relativePath,
-          node_type: (fmLocal.node_type as string) ?? 'Blueprint',
-          parent_class: (fmLocal.parent_class as string | undefined) ?? undefined,
-          // Ship the skeleton frontmatter as ast_data so the LLM has the
-          // exports/edges/components context to reason from.  This mirrors
-          // the structured fields the framework scan already extracted.
-          ast_data: {
-            exports_functions: fmLocal.exports_functions ?? [],
-            exports_events: fmLocal.exports_events ?? [],
-            exports_dispatchers: fmLocal.exports_dispatchers ?? [],
-            components: fmLocal.components ?? [],
-            edges: fmLocal.edges ?? {},
-            ast_hash: fmLocal.ast_hash,
-          },
-          outbound_edges: [],
-        },
+        node: buildScanNodeFromFrontmatter(file.frontmatter, relativePath),
         project_root: projectRoot,
         provider_config: cfg,
       });
@@ -157,8 +166,25 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
             >
               {t({ en: '⚙ provider', zh: '⚙ 服务商' })}
             </button>
+            {canOpenInUE && (
+              <button
+                className="btn-text"
+                onClick={onOpenInUE}
+                title={t({
+                  en: 'Open this Blueprint in the UE editor (focuses an existing tab if already open)',
+                  zh: '在 UE 编辑器中打开此蓝图（已打开则切到已有标签）',
+                })}
+              >
+                {t({ en: '↗ Open in UE', zh: '↗ 在 UE 中打开' })}
+              </button>
+            )}
           </div>
         </div>
+        {openState.kind === 'error' && (
+          <div className="settings-status settings-status-error" style={{ marginTop: 8 }}>
+            {openState.message}
+          </div>
+        )}
         {deepState.kind === 'error' && (
           <div className="settings-status settings-status-error" style={{ marginTop: 8 }}>
             {deepState.message}
