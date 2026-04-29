@@ -119,14 +119,25 @@ export function buildScanASTFromFrontmatter(fm: VaultFrontmatter): ScanASTData {
 // always gets edges regardless of whether the source was a bridge call
 // (where edges came from C++) or a frontmatter read (where edges came
 // from a previous scan's .md).
+//
+// Defensive: edges with missing/empty `target` are dropped here.  The
+// backend's EdgePayload Pydantic model requires `target: str` (non-empty)
+// and rejects the whole request with HTTP 422 if any item lacks it.  A
+// historical scan or an older plugin version occasionally seeded the
+// vault frontmatter with target-less edges (e.g. when target_asset
+// failed to resolve to a project-local name and the writer didn't filter);
+// dropping them at the outbound boundary prevents one bad row from
+// breaking Deep Reasoning entirely.
 export function flattenEdgesToOutbound(
   edges: ScanASTData['edges'],
 ): ScanBatchEdge[] {
   const out: ScanBatchEdge[] = [];
   for (const [kind, list] of Object.entries(edges)) {
     for (const e of list ?? []) {
+      const target = (e?.target ?? '').toString().trim();
+      if (!target) continue;
       out.push({
-        target: e.target,
+        target,
         edge_type: kind,
         refs: e.refs ?? [],
       });
