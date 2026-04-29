@@ -1043,6 +1043,41 @@ async def vault_rebuild_backlinks(project_root: str, language: Optional[str] = N
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Apply rename — migrate a vault .md to match a UE asset rename
+# ─────────────────────────────────────────────────────────────────────────────
+# Wired to the TopBar stale-asset dropdown's "Apply rename" button.  Body
+# and NOTES sections are preserved; only `title` + `asset_path` (and a new
+# `previous_asset_path` audit field) get updated, and the file is moved
+# to a filename derived from new_name.
+
+class ApplyRenameRequest(BaseModel):
+    project_root: str
+    old_relative_path: str
+    new_name: str
+    new_asset_path: str
+
+
+@app.post("/api/v1/vault/apply-rename")
+async def vault_apply_rename(req: ApplyRenameRequest):
+    try:
+        result = vault_writer.apply_rename(
+            req.project_root,
+            req.old_relative_path,
+            req.new_name,
+            req.new_asset_path,
+        )
+        return result
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except FileExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"apply-rename failed: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Vault export — bundle the entire vault into a single JSON document
 # ─────────────────────────────────────────────────────────────────────────────
 # Lets users hand the project graph to any external LLM (ChatGPT web, Claude.ai)

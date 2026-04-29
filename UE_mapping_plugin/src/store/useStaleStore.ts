@@ -1,15 +1,19 @@
 import { create } from 'zustand';
 
-// Per-asset stale record.  We keep the most recent event metadata per path
-// so the TopBar dropdown can show "what changed and when" — not just a
-// flat count.  `oldPath` carries the previous object path on a rename
-// (so the dropdown row for /Game/X/BP_New can say "renamed from BP_Old"),
-// and the orphan side of the rename gets its own entry where `oldPath`
-// holds the new path so the user can find where it moved to.
+// Per-asset stale record.  We surface the most recent event metadata per
+// path so the TopBar dropdown can render rich info (renamed-from-X / type
+// chip / timestamp) instead of a flat count.
+//
+// For renames, a SINGLE entry is stored — keyed by the new path (where
+// the asset is now), with `previousPath` carrying the path the asset used
+// to live at.  The TopBar display can then render "BP_Old → BP_New" in
+// one row, and the "Apply rename" button knows both endpoints.  This
+// matters for vault navigation: the existing vault note still lives at
+// previousPath (the OLD title) until the user applies the rename.
 export interface StaleEntry {
-  path: string;
+  path: string;             // current asset path (post-rename)
   type: 'renamed' | 'removed' | 'added' | 'updated';
-  oldPath?: string;
+  previousPath?: string;    // populated only for 'renamed'
   timestampSec: number;
 }
 
@@ -22,13 +26,11 @@ interface StaleEvent {
 }
 
 interface StaleState {
-  // Every path with a pending stale flag.  Keyed by the canonical
-  // /Game/Path/Asset.Asset string vault frontmatter stores under
-  // `asset_path`.  Map (not Set) because we surface event metadata
-  // to the TopBar dropdown.
+  // All pending stale flags, keyed by the current asset path.  Map (not
+  // Set) because dropdown UI surfaces event metadata.
   staleByPath: Map<string, StaleEntry>;
-  // Highest event counter applied to the store.  Next poll passes this
-  // back to the bridge so we only fetch new events.
+  // Highest event counter applied to the store; the next bridge poll
+  // passes this back so we only fetch new events.
   latestCounter: number;
   syncActive: boolean;
   lastError: string | null;
@@ -36,7 +38,14 @@ interface StaleState {
   applyEvents: (events: StaleEvent[], latestCounter: number) => void;
   clearAll: () => void;
   removePath: (assetPath: string) => void;
+  // For renames: accept the new path, but also clear the previousPath
+  // entry if present (defensive — older builds wrote both halves).
+  removeRename: (currentPath: string, previousPath?: string) => void;
+  // True when assetPath is itself stale, OR when assetPath is the OLD
+  // location of a renamed asset.  Lv2/Lv3 use this so a vault note still
+  // sitting at its old asset_path lights up after the user renames in UE.
   isStale: (assetPath: string) => boolean;
+  staleEntryFor: (assetPath: string) => StaleEntry | undefined;
   setSyncActive: (active: boolean) => void;
   setLastError: (err: string | null) => void;
 }
@@ -53,28 +62,20 @@ export const useStaleStore = create<StaleState>((set, get) => ({
     const next = new Map(s.staleByPath);
     for (const ev of events) {
       if (ev.type === 'renamed' && ev.old_path) {
-        // Rename produces TWO logical stale rows the user cares about:
-        //   - old_path: the orphaned vault note (no asset matches it now)
-        //   - new_path: the asset that moved here (no vault note for this path)
-        // Each row carries the OTHER side as its `oldPath` so the dropdown
-        // can render "renamed from X" / "renamed to Y".
-        next.set(ev.old_path, {
-          path: ev.old_path,
-          type: 'renamed',
-          oldPath: ev.path,
-          timestampSec: ev.timestamp_sec,
-        });
+        // ONE entry per rename, keyed by new path.  If the old path had
+        // its own entry (e.g., an `updated` before this rename), drop it
+        // — the new entry supersedes.
+        next.delete(ev.old_path);
         next.set(ev.path, {
           path: ev.path,
           type: 'renamed',
-          oldPath: ev.old_path,
+          previousPath: ev.old_path,
           timestampSec: ev.timestamp_sec,
         });
       } else {
         next.set(ev.path, {
           path: ev.path,
           type: ev.type,
-          oldPath: ev.old_path,
           timestampSec: ev.timestamp_sec,
         });
       }
@@ -95,9 +96,36 @@ export const useStaleStore = create<StaleState>((set, get) => ({
     return { staleByPath: next };
   }),
 
+  removeRename: (currentPath, previousPath) => set((s) => {
+    let touched = false;
+    const next = new Map(s.staleByPath);
+    if (next.delete(currentPath)) touched = true;
+    if (previousPath && next.delete(previousPath)) touched = true;
+    return touched ? { staleByPath: next } : {};
+  }),
+
   isStale: (assetPath) => {
     if (!assetPath) return false;
-    return get().staleByPath.has(assetPath);
+    const map = get().staleByPath;
+    if (map.has(assetPath)) return true;
+    // Reverse lookup: this assetPath is the OLD location of a renamed
+    // asset.  The vault note still sits here, so the Lv2/Lv3 view of it
+    // should still flag stale.
+    for (const e of map.values()) {
+      if (e.type === 'renamed' && e.previousPath === assetPath) return true;
+    }
+    return false;
+  },
+
+  staleEntryFor: (assetPath) => {
+    if (!assetPath) return undefined;
+    const map = get().staleByPath;
+    const direct = map.get(assetPath);
+    if (direct) return direct;
+    for (const e of map.values()) {
+      if (e.type === 'renamed' && e.previousPath === assetPath) return e;
+    }
+    return undefined;
   },
 
   setSyncActive: (active) => set({ syncActive: active }),

@@ -974,3 +974,67 @@ def _write_system_md(
     tmp.write_text(full_text, encoding="utf-8")
     os.replace(tmp, out_path)
     return str(out_path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Apply-rename — migrate a vault .md to match a UE asset rename.
+# ─────────────────────────────────────────────────────────────────────────────
+# Used by the TopBar stale-asset dropdown's "Apply rename" button (HANDOFF
+# §A1 P1 follow-up).  Triggered when the AssetRegistry stale listener has
+# observed a rename from old_path → new_path; this function:
+#   1. reads the existing vault .md frontmatter
+#   2. updates `title` + `asset_path` in-place (stamping the previous
+#      asset_path into `previous_asset_path` so history is traceable)
+#   3. writes the updated content under a new filename derived from new_name
+#   4. deletes the old file
+# Body and NOTES sections are preserved verbatim — the user's developer-
+# private notes never get touched.
+
+def apply_rename(
+    project_root: str,
+    old_relative_path: str,
+    new_name: str,
+    new_asset_path: str,
+) -> Dict[str, Any]:
+    """Rename a vault .md to match a UE asset rename.  Returns
+    {new_relative_path, previous_asset_path}."""
+    root = vault_root(project_root).resolve()
+    old_path = (root / old_relative_path).resolve()
+    if not str(old_path).startswith(str(root)):
+        raise ValueError(f"Path traversal denied: {old_relative_path}")
+    if not old_path.exists():
+        raise FileNotFoundError(f"Source not found: {old_relative_path}")
+
+    new_filename = _sanitise_filename(new_name) + ".md"
+    new_path = (old_path.parent / new_filename).resolve()
+    if new_path != old_path and new_path.exists():
+        raise FileExistsError(
+            f"Target already exists: {new_path.relative_to(root)} — "
+            f"vault note for '{new_name}' is already there"
+        )
+
+    text = old_path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise ValueError(f"File missing YAML frontmatter: {old_relative_path}")
+    end = text.find("\n---\n", 4)
+    if end == -1:
+        raise ValueError(f"Frontmatter not closed: {old_relative_path}")
+
+    fm = yaml.safe_load(text[4:end]) or {}
+    body = text[end + 5:]
+
+    previous_asset_path = fm.get("asset_path", "") or ""
+    fm["title"] = new_name
+    fm["asset_path"] = new_asset_path
+    if previous_asset_path and previous_asset_path != new_asset_path:
+        fm["previous_asset_path"] = previous_asset_path
+
+    new_text = _render_frontmatter(fm) + body
+    new_path.write_text(new_text, encoding="utf-8")
+    if new_path != old_path:
+        old_path.unlink()
+
+    return {
+        "new_relative_path": str(new_path.relative_to(root)).replace("\\", "/"),
+        "previous_asset_path": previous_asset_path,
+    }

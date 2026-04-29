@@ -135,7 +135,18 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
   const variables = (fm.variables ?? []) as Array<Record<string, unknown>>;
   const analysisState = (fm.analysis_state as string | undefined) ?? 'skeleton';
   const assetPathForStale = (fm.asset_path as string) ?? '';
-  const staleEntry = assetPathForStale ? staleByPath.get(assetPathForStale) : undefined;
+  // Reverse lookup: the vault note still lives under its old asset_path
+  // until the user applies the rename, so we ALSO match against
+  // previousPath of every renamed entry.
+  const staleEntry = useMemo(() => {
+    if (!assetPathForStale) return undefined;
+    const direct = staleByPath.get(assetPathForStale);
+    if (direct) return direct;
+    for (const e of staleByPath.values()) {
+      if (e.type === 'renamed' && e.previousPath === assetPathForStale) return e;
+    }
+    return undefined;
+  }, [staleByPath, assetPathForStale]);
   const isCurrentStale = !!staleEntry;
 
   return (
@@ -152,43 +163,48 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
                 ? t({ en: 'LLM analyzed', zh: '已 LLM 分析' })
                 : t({ en: 'skeleton', zh: '骨架' })}
             </Pill>
-            {isCurrentStale && (
-              <span
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: 6,
-                  padding: '4px 12px',
-                  borderRadius: 14,
-                  background: '#dc2626',
-                  color: '#fff',
-                  fontSize: 'var(--fs-sm)',
-                  fontWeight: 700,
-                  letterSpacing: '0.02em',
-                  boxShadow: '0 1px 2px rgba(220, 38, 38, 0.4)',
-                }}
-                title={
-                  staleEntry?.type === 'renamed' && staleEntry?.oldPath
-                    ? t({
-                        en: `Renamed in editor (was ${staleEntry.oldPath}) — vault note is stale`,
-                        zh: `编辑器中已重命名（原路径 ${staleEntry.oldPath}）— vault 笔记已过期`,
-                      })
-                    : t({
-                        en: 'This blueprint changed in the UE editor since last scan — re-run Deep Reasoning to refresh',
-                        zh: '自上次扫描以来此蓝图在 UE 编辑器中变更 — 点击下方"深度推理"重新分析',
-                      })
-                }
-              >
-                ⚠ {t({
-                  en: staleEntry?.type === 'removed' ? 'Deleted in editor' :
-                      staleEntry?.type === 'renamed' ? 'Renamed in editor' :
-                      'Changed in editor',
-                  zh: staleEntry?.type === 'removed' ? '编辑器中已删除' :
-                      staleEntry?.type === 'renamed' ? '编辑器中已重命名' :
-                      '编辑器中已变更',
-                })} — {t({ en: 'rescan needed', zh: '需要重扫' })}
-              </span>
-            )}
+            {isCurrentStale && staleEntry && (() => {
+              // Detect which side of a rename this Lv2 is viewing:
+              //   - 'to':   vault note still at OLD path (most common — user
+              //             renamed in UE, vault hasn't been migrated yet)
+              //   - 'from': vault note at NEW path (rare — manual frontmatter edit)
+              //   - null:   not a rename (deleted / added / updated)
+              const renameDir: 'to' | 'from' | null =
+                staleEntry.type === 'renamed'
+                  ? (assetPathForStale === staleEntry.previousPath ? 'to' : 'from')
+                  : null;
+              const newName = staleEntry.path.split('/').pop()?.split('.')[0] ?? '';
+              const oldName = (staleEntry.previousPath ?? '').split('/').pop()?.split('.')[0] ?? '';
+              const label =
+                staleEntry.type === 'removed' ? t({ en: 'Deleted in editor', zh: '编辑器中已删除' }) :
+                staleEntry.type === 'renamed' && renameDir === 'to' ? t({ en: `Renamed to ${newName} in editor`, zh: `编辑器中已重命名为 ${newName}` }) :
+                staleEntry.type === 'renamed' && renameDir === 'from' ? t({ en: `Renamed from ${oldName} in editor`, zh: `编辑器中已从 ${oldName} 重命名` }) :
+                staleEntry.type === 'renamed' ? t({ en: 'Renamed in editor', zh: '编辑器中已重命名' }) :
+                t({ en: 'Changed in editor', zh: '编辑器中已变更' });
+              return (
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '4px 12px',
+                    borderRadius: 14,
+                    background: '#dc2626',
+                    color: '#fff',
+                    fontSize: 'var(--fs-sm)',
+                    fontWeight: 700,
+                    letterSpacing: '0.02em',
+                    boxShadow: '0 1px 2px rgba(220, 38, 38, 0.4)',
+                  }}
+                  title={t({
+                    en: 'Open the TopBar dropdown to apply this rename in vault, or re-run Deep Reasoning manually',
+                    zh: '打开 TopBar 下拉可一键应用 vault 重命名，或手动点击下方"深度推理"',
+                  })}
+                >
+                  ⚠ {label} — {t({ en: 'rescan needed', zh: '需要重扫' })}
+                </span>
+              );
+            })()}
           </div>
           <div className="bp-focus-deep">
             <button

@@ -214,3 +214,42 @@ export function downloadJSON(filename: string, payload: unknown): void {
   // Defer revoke so the download can start before we drop the blob.
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+
+// ---- Apply UE asset rename to vault ----------------------------------------
+// When the AssetRegistry stale listener observes a rename, the TopBar
+// dropdown offers an "Apply rename" button that calls this — moves the
+// vault .md to a new filename and updates `title` + `asset_path` in
+// frontmatter, preserving body and NOTES.
+
+export interface ApplyRenameResult {
+  new_relative_path: string;
+  previous_asset_path: string;
+}
+
+export async function applyVaultRename(
+  projectRoot: string,
+  oldRelativePath: string,
+  newName: string,
+  newAssetPath: string,
+): Promise<ApplyRenameResult> {
+  const url = `${API_BASE}/api/v1/vault/apply-rename`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      project_root: projectRoot,
+      old_relative_path: oldRelativePath,
+      new_name: newName,
+      new_asset_path: newAssetPath,
+    }),
+  });
+  if (!r.ok) {
+    let detail = `HTTP ${r.status}`;
+    try {
+      const body = await r.json();
+      if (body?.detail) detail = String(body.detail);
+    } catch { /* ignore */ }
+    throw new Error(`apply-rename ${detail}`);
+  }
+  return (await r.json()) as ApplyRenameResult;
+}

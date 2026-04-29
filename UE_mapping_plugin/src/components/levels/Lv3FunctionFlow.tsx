@@ -146,27 +146,39 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
         <div>
           <h2 style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
             {state.flow.function}
-            {!!assetPath && staleByPath.has(assetPath) && (
-              <span
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  padding: '4px 12px',
-                  borderRadius: 14,
-                  background: '#dc2626',
-                  color: '#fff',
-                  fontSize: 'var(--fs-sm)',
-                  fontWeight: 700,
-                  boxShadow: '0 1px 2px rgba(220, 38, 38, 0.4)',
-                }}
-                title={t({
-                  en: 'This blueprint changed in the UE editor since last scan — function flow may be out of date, re-scan recommended',
-                  zh: '自上次扫描以来此蓝图在 UE 编辑器中变更 — 函数流可能已过期，建议重扫',
-                })}
-              >
-                {t({ en: '⚠ Changed in editor — rescan needed', zh: '⚠ 编辑器中已变更 — 需要重扫' })}
-              </span>
-            )}
+            {(() => {
+              if (!assetPath) return null;
+              // Reverse lookup: vault note may still sit at the old asset_path
+              // after a UE rename, so check both direct and previousPath match.
+              let entry = staleByPath.get(assetPath);
+              if (!entry) {
+                for (const e of staleByPath.values()) {
+                  if (e.type === 'renamed' && e.previousPath === assetPath) { entry = e; break; }
+                }
+              }
+              if (!entry) return null;
+              return (
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    padding: '4px 12px',
+                    borderRadius: 14,
+                    background: '#dc2626',
+                    color: '#fff',
+                    fontSize: 'var(--fs-sm)',
+                    fontWeight: 700,
+                    boxShadow: '0 1px 2px rgba(220, 38, 38, 0.4)',
+                  }}
+                  title={t({
+                    en: 'This blueprint changed in the UE editor since last scan — function flow may be out of date, re-scan recommended',
+                    zh: '自上次扫描以来此蓝图在 UE 编辑器中变更 — 函数流可能已过期，建议重扫',
+                  })}
+                >
+                  {t({ en: '⚠ Changed in editor — rescan needed', zh: '⚠ 编辑器中已变更 — 需要重扫' })}
+                </span>
+              );
+            })()}
           </h2>
           <span className="muted">
             {t({
