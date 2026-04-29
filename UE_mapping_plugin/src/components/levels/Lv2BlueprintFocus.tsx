@@ -29,7 +29,7 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
   const getProviderConfig = useLLMStore((s) => s.getProviderConfig);
   const llmProvider = useLLMStore((s) => s.provider);
   const removeStalePath = useStaleStore((s) => s.removePath);
-  const stalePaths = useStaleStore((s) => s.stalePaths);
+  const staleByPath = useStaleStore((s) => s.staleByPath);
 
   useEffect(() => {
     if (!file) loadFile(relativePath);
@@ -135,7 +135,8 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
   const variables = (fm.variables ?? []) as Array<Record<string, unknown>>;
   const analysisState = (fm.analysis_state as string | undefined) ?? 'skeleton';
   const assetPathForStale = (fm.asset_path as string) ?? '';
-  const isCurrentStale = !!assetPathForStale && stalePaths.has(assetPathForStale);
+  const staleEntry = assetPathForStale ? staleByPath.get(assetPathForStale) : undefined;
+  const isCurrentStale = !!staleEntry;
 
   return (
     <div className="bp-focus">
@@ -152,9 +153,41 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
                 : t({ en: 'skeleton', zh: '骨架' })}
             </Pill>
             {isCurrentStale && (
-              <Pill kind="risk-warning">
-                {t({ en: '⚠ stale (changed in editor)', zh: '⚠ 已变更（编辑器中改动）' })}
-              </Pill>
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '4px 12px',
+                  borderRadius: 14,
+                  background: '#dc2626',
+                  color: '#fff',
+                  fontSize: 'var(--fs-sm)',
+                  fontWeight: 700,
+                  letterSpacing: '0.02em',
+                  boxShadow: '0 1px 2px rgba(220, 38, 38, 0.4)',
+                }}
+                title={
+                  staleEntry?.type === 'renamed' && staleEntry?.oldPath
+                    ? t({
+                        en: `Renamed in editor (was ${staleEntry.oldPath}) — vault note is stale`,
+                        zh: `编辑器中已重命名（原路径 ${staleEntry.oldPath}）— vault 笔记已过期`,
+                      })
+                    : t({
+                        en: 'This blueprint changed in the UE editor since last scan — re-run Deep Reasoning to refresh',
+                        zh: '自上次扫描以来此蓝图在 UE 编辑器中变更 — 点击下方"深度推理"重新分析',
+                      })
+                }
+              >
+                ⚠ {t({
+                  en: staleEntry?.type === 'removed' ? 'Deleted in editor' :
+                      staleEntry?.type === 'renamed' ? 'Renamed in editor' :
+                      'Changed in editor',
+                  zh: staleEntry?.type === 'removed' ? '编辑器中已删除' :
+                      staleEntry?.type === 'renamed' ? '编辑器中已重命名' :
+                      '编辑器中已变更',
+                })} — {t({ en: 'rescan needed', zh: '需要重扫' })}
+              </span>
             )}
           </div>
           <div className="bp-focus-deep">

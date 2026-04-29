@@ -34,7 +34,7 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
   const t = useT();
   const file = useVaultStore((s) => s.fileCache[relativePath]);
   const loadFile = useVaultStore((s) => s.loadFile);
-  const stalePaths = useStaleStore((s) => s.stalePaths);
+  const staleByPath = useStaleStore((s) => s.staleByPath);
   const [state, setState] = useState<LoadState>({ kind: 'idle' });
 
   useEffect(() => {
@@ -144,27 +144,27 @@ export const Lv3FunctionFlow: React.FC<Props> = ({ relativePath, functionId }) =
     <div className="function-flow">
       <div className="function-flow-header">
         <div>
-          <h2 style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+          <h2 style={{ display: 'inline-flex', alignItems: 'center', gap: 10 }}>
             {state.flow.function}
-            {!!assetPath && stalePaths.has(assetPath) && (
+            {!!assetPath && staleByPath.has(assetPath) && (
               <span
                 style={{
                   display: 'inline-flex',
                   alignItems: 'center',
-                  padding: '2px 8px',
-                  borderRadius: 10,
-                  background: 'rgba(204, 132, 30, 0.18)',
-                  color: '#cc841e',
-                  fontSize: 'var(--fs-xs)',
-                  fontWeight: 600,
-                  border: '1px solid rgba(204, 132, 30, 0.35)',
+                  padding: '4px 12px',
+                  borderRadius: 14,
+                  background: '#dc2626',
+                  color: '#fff',
+                  fontSize: 'var(--fs-sm)',
+                  fontWeight: 700,
+                  boxShadow: '0 1px 2px rgba(220, 38, 38, 0.4)',
                 }}
                 title={t({
-                  en: 'This blueprint changed in the UE editor since last scan — function flow may be out of date',
-                  zh: '自上次扫描以来此蓝图在 UE 编辑器中变更 — 函数流可能已过期',
+                  en: 'This blueprint changed in the UE editor since last scan — function flow may be out of date, re-scan recommended',
+                  zh: '自上次扫描以来此蓝图在 UE 编辑器中变更 — 函数流可能已过期，建议重扫',
                 })}
               >
-                {t({ en: '⚠ stale', zh: '⚠ 已变更' })}
+                {t({ en: '⚠ Changed in editor — rescan needed', zh: '⚠ 编辑器中已变更 — 需要重扫' })}
               </span>
             )}
           </h2>
