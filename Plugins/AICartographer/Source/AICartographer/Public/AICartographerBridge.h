@@ -69,6 +69,14 @@ public:
     UFUNCTION(BlueprintCallable, Category = "AICartographer|Vault")
     FString WriteVaultFile(const FString& ProjectRoot, const FString& RelativePath, const FString& Content);
 
+    // Delete a single vault .md file.  Used by the TopBar stale-asset
+    // dropdown when the user applies a `removed` event (asset gone in editor
+    // → drop the matching note) and by the bridge-side rename path (write
+    // new, then delete old).  Path traversal guarded.
+    // Returns: {"ok": true, "deleted_relative_path": "..."} or {"ok": false, "error": "..."}
+    UFUNCTION(BlueprintCallable, Category = "AICartographer|Vault")
+    FString DeleteVaultFile(const FString& ProjectRoot, const FString& RelativePath);
+
     // Synchronously read a single function's graph from a Blueprint asset and
     // return its node/edge structure as JSON. Used by Lv3 function-flow view.
     // Returns:

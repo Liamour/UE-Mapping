@@ -1038,6 +1038,29 @@ FString UAICartographerBridge::WriteVaultFile(const FString& ProjectRoot, const 
     return SerializeJson(Root);
 }
 
+FString UAICartographerBridge::DeleteVaultFile(const FString& ProjectRoot, const FString& RelativePath)
+{
+    FString VaultRoot = JoinVaultPath(ProjectRoot);
+    FString FullPath = FPaths::Combine(VaultRoot, RelativePath);
+    FString FullPathAbs = ToForwardSlashes(FPaths::ConvertRelativePathToFull(FullPath));
+    FString VaultRootAbs = ToForwardSlashes(FPaths::ConvertRelativePathToFull(VaultRoot));
+
+    if (!FullPathAbs.StartsWith(VaultRootAbs))
+        return MakeErrorJson(TEXT("path escapes vault root"));
+
+    IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
+    if (!PlatformFile.FileExists(*FullPathAbs))
+        return MakeErrorJson(FString::Printf(TEXT("vault note not found: %s"), *RelativePath));
+
+    if (!PlatformFile.DeleteFile(*FullPathAbs))
+        return MakeErrorJson(FString::Printf(TEXT("failed to delete %s"), *RelativePath));
+
+    TSharedRef<FJsonObject> Root = MakeShareable(new FJsonObject());
+    Root->SetBoolField(TEXT("ok"), true);
+    Root->SetStringField(TEXT("deleted_relative_path"), RelativePath);
+    return SerializeJson(Root);
+}
+
 // ---------------------------------------------------------------------------
 // Function-flow extraction — used by Lv3 view. Loads the named function graph,
 // classifies each node (event/call/branch/cast/macro/etc.), and serializes

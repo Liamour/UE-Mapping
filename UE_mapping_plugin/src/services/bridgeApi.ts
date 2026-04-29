@@ -18,6 +18,7 @@ interface AICartographerBridge {
   readvaultfile?: (projectRoot: string, relativePath: string) => Promise<string> | string;
   writevaultnotes?: (projectRoot: string, relativePath: string, content: string) => Promise<string> | string;
   writevaultfile?: (projectRoot: string, relativePath: string, content: string) => Promise<string> | string;
+  deletevaultfile?: (projectRoot: string, relativePath: string) => Promise<string> | string;
 
   readblueprintfunctionflow?: (assetPath: string, functionName: string) => Promise<string> | string;
 
@@ -211,6 +212,25 @@ export function isFunctionFlowAvailable(): boolean {
 export function isVaultFileWriteAvailable(): boolean {
   const b = getBridge();
   return typeof b?.writevaultfile === 'function';
+}
+
+// True only when the C++ plugin exposes DeleteVaultFile (added in the rename
+// + delete pass).  Older binaries return false → vaultApi falls back to the
+// HTTP backend for delete operations.
+export function isVaultDeleteAvailable(): boolean {
+  const b = getBridge();
+  return typeof b?.deletevaultfile === 'function';
+}
+
+export async function bridgeDeleteVaultFile(
+  projectRoot: string,
+  relativePath: string,
+): Promise<{ ok: true; deleted_relative_path: string }> {
+  const b = getBridge();
+  if (!b?.deletevaultfile) {
+    throw new Error('deletevaultfile not bound (rebuild C++ plugin)');
+  }
+  return callBridgeJSON(b.deletevaultfile(projectRoot, relativePath), 'deletevaultfile');
 }
 
 // ---- Project-wide scan orchestration -------------------------------------

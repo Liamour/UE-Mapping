@@ -1,5 +1,13 @@
 import { parseFrontmatter, stripFrontmatter, extractNotes, normalizeFrontmatter, type VaultFrontmatter } from '../utils/frontmatter';
-import { isBridgeAvailable, bridgeListVault, bridgeReadVaultFile, bridgeWriteVaultNotes } from './bridgeApi';
+import {
+  isBridgeAvailable,
+  bridgeListVault,
+  bridgeReadVaultFile,
+  bridgeWriteVaultNotes,
+  bridgeWriteVaultFile,
+  bridgeDeleteVaultFile,
+  isVaultDeleteAvailable,
+} from './bridgeApi';
 
 const API_BASE = 'http://localhost:8000';
 
@@ -232,24 +240,210 @@ export async function applyVaultRename(
   newName: string,
   newAssetPath: string,
 ): Promise<ApplyRenameResult> {
+  // Bridge-mode rename: read the old file, rewrite frontmatter (title +
+  // asset_path), write to the new path, then delete the old file via the
+  // bridge.  Falls back to the HTTP backend if the bridge isn't available
+  // OR if the bridge lacks DeleteVaultFile (older plugin binary) — the HTTP
+  // path still works once the user starts the Python backend.
+  if (isBridgeAvailable() && isVaultDeleteAvailable()) {
+    return await bridgeRenameVaultFile(projectRoot, oldRelativePath, newName, newAssetPath);
+  }
   const url = `${API_BASE}/api/v1/vault/apply-rename`;
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      project_root: projectRoot,
-      old_relative_path: oldRelativePath,
-      new_name: newName,
-      new_asset_path: newAssetPath,
-    }),
-  });
+  let r: Response;
+  try {
+    r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project_root: projectRoot,
+        old_relative_path: oldRelativePath,
+        new_name: newName,
+        new_asset_path: newAssetPath,
+      }),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`apply-rename: backend unreachable (${msg}). Start the Python backend or rebuild the C++ plugin so the bridge can do this offline.`);
+  }
   if (!r.ok) {
     let detail = `HTTP ${r.status}`;
     try {
       const body = await r.json();
       if (body?.detail) detail = String(body.detail);
     } catch { /* ignore */ }
+    if (r.status === 404 && detail === 'Not Found') {
+      throw new Error('apply-rename: backend route missing — restart Python backend with the latest main.py');
+    }
     throw new Error(`apply-rename ${detail}`);
   }
   return (await r.json()) as ApplyRenameResult;
+}
+
+// Bridge-side rename: pure JS, runs entirely in the editor.  No backend
+// required.  We read the file, rewrite the title/asset_path/previous_asset_path
+// fields in its frontmatter (preserving everything else verbatim including
+// NOTES), write it under the new filename, then delete the old file.
+async function bridgeRenameVaultFile(
+  projectRoot: string,
+  oldRelativePath: string,
+  newName: string,
+  newAssetPath: string,
+): Promise<ApplyRenameResult> {
+  const file = await bridgeReadVaultFile(projectRoot, oldRelativePath);
+  const oldRaw = file.content;
+  if (!oldRaw.startsWith('---\n')) {
+    throw new Error(`apply-rename: ${oldRelativePath} missing YAML frontmatter`);
+  }
+  const fmEnd = oldRaw.indexOf('\n---\n', 4);
+  if (fmEnd === -1) throw new Error(`apply-rename: ${oldRelativePath} frontmatter not closed`);
+  const fmText = oldRaw.slice(4, fmEnd);
+  const body = oldRaw.slice(fmEnd + 5);
+
+  // Hand-rolled minimal YAML rewrite — replace `title:` and `asset_path:`
+  // values, preserving every other line.  Adds previous_asset_path if the
+  // path actually changed.  Avoids pulling in a YAML serializer library.
+  const lines = fmText.split('\n');
+  let titleSet = false;
+  let assetSet = false;
+  let previousAssetPath = '';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^title\s*:/.test(line)) {
+      lines[i] = `title: ${yamlScalar(newName)}`;
+      titleSet = true;
+    } else if (/^asset_path\s*:/.test(line)) {
+      const match = line.match(/^asset_path\s*:\s*(.*)$/);
+      if (match) {
+        const existing = match[1].trim();
+        previousAssetPath = unquote(existing);
+      }
+      lines[i] = `asset_path: ${yamlScalar(newAssetPath)}`;
+      assetSet = true;
+    }
+  }
+  if (!titleSet) lines.unshift(`title: ${yamlScalar(newName)}`);
+  if (!assetSet) lines.unshift(`asset_path: ${yamlScalar(newAssetPath)}`);
+  if (previousAssetPath && previousAssetPath !== newAssetPath) {
+    // Replace existing previous_asset_path or append a new one.
+    let updated = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (/^previous_asset_path\s*:/.test(lines[i])) {
+        lines[i] = `previous_asset_path: ${yamlScalar(previousAssetPath)}`;
+        updated = true;
+        break;
+      }
+    }
+    if (!updated) lines.push(`previous_asset_path: ${yamlScalar(previousAssetPath)}`);
+  }
+  const newContent = `---\n${lines.join('\n')}\n---\n${body}`;
+
+  const slashIdx = oldRelativePath.lastIndexOf('/');
+  const dir = slashIdx >= 0 ? oldRelativePath.slice(0, slashIdx + 1) : '';
+  const newRelativePath = `${dir}${sanitiseFilename(newName)}.md`;
+
+  // Write under the new path first so a half-failure (write OK, delete fail)
+  // leaves the user with the new file rather than nothing at all.
+  await bridgeWriteVaultFile(projectRoot, newRelativePath, newContent);
+  if (newRelativePath !== oldRelativePath) {
+    await bridgeDeleteVaultFile(projectRoot, oldRelativePath);
+  }
+  return {
+    new_relative_path: newRelativePath,
+    previous_asset_path: previousAssetPath,
+  };
+}
+
+function yamlScalar(s: string): string {
+  if (s === '') return '""';
+  if (
+    /[:#\[\]{}&*!|>'"%@`,?]/.test(s) ||
+    s.startsWith('-') ||
+    s.startsWith(' ') ||
+    s.endsWith(' ')
+  ) {
+    return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+  return s;
+}
+
+function unquote(s: string): string {
+  const trimmed = s.trim();
+  if (trimmed.length >= 2 && (trimmed.startsWith('"') || trimmed.startsWith("'"))) {
+    const q = trimmed[0];
+    if (trimmed.endsWith(q)) {
+      return trimmed.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+    }
+  }
+  return trimmed;
+}
+
+function sanitiseFilename(name: string): string {
+  // Mirror backend/vault_writer.py:_sanitise_filename — replace anything that
+  // isn't a word char / hyphen / dot with underscore, strip leading/trailing
+  // dots and underscores, and fall back to "untitled" if the result is empty.
+  const cleaned = name.replace(/[^\w\-.]+/g, '_').replace(/^[._]+/, '').replace(/[._]+$/, '');
+  return cleaned || 'untitled';
+}
+
+// ---- Delete a single vault note --------------------------------------------
+// Used by the TopBar stale-asset dropdown Apply button on a `removed` event:
+// the asset is gone from the editor, the user has confirmed, the .md goes too.
+export interface DeleteVaultResult {
+  ok: true;
+  deleted_relative_path: string;
+}
+
+export async function deleteVaultFile(
+  projectRoot: string,
+  relativePath: string,
+): Promise<DeleteVaultResult> {
+  if (isVaultDeleteAvailable()) {
+    return await bridgeDeleteVaultFile(projectRoot, relativePath);
+  }
+  const url = `${API_BASE}/api/v1/vault/delete-file`;
+  let r: Response;
+  try {
+    r = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_root: projectRoot, relative_path: relativePath }),
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new Error(`delete-file: backend unreachable (${msg}). Start the Python backend or rebuild the C++ plugin so the bridge can do this offline.`);
+  }
+  if (!r.ok) {
+    let detail = `HTTP ${r.status}`;
+    try {
+      const body = await r.json();
+      if (body?.detail) detail = String(body.detail);
+    } catch { /* ignore */ }
+    if (r.status === 404 && detail === 'Not Found') {
+      throw new Error('delete-file: backend route missing — restart Python backend with the latest main.py');
+    }
+    throw new Error(`delete-file ${detail}`);
+  }
+  return (await r.json()) as DeleteVaultResult;
+}
+
+// ---- find-by-asset ---------------------------------------------------------
+// Look up an existing vault note by asset_path (regardless of which subdir
+// it currently lives in).  framework-scan calls this before writing a fresh
+// skeleton so it preserves a user's manual reorganisation.
+export async function findVaultNoteByAsset(
+  projectRoot: string,
+  assetPath: string,
+): Promise<string | null> {
+  // No bridge equivalent — bridge mode falls back to listing + reading every
+  // note locally (handled in frameworkScan.ts).  This HTTP path is the fast
+  // path when the backend is reachable.
+  const url = `${API_BASE}/api/v1/vault/find-by-asset?project_root=${encodeURIComponent(projectRoot)}&asset_path=${encodeURIComponent(assetPath)}`;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return null;
+    const data = await r.json();
+    return (data?.relative_path as string | null) ?? null;
+  } catch {
+    return null;
+  }
 }

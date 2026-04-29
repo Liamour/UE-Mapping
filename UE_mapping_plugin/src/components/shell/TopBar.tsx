@@ -3,7 +3,7 @@ import { useUIStore } from '../../store/useUIStore';
 import { useVaultStore } from '../../store/useVaultStore';
 import { useTabsStore } from '../../store/useTabsStore';
 import { useStaleStore, type StaleEntry } from '../../store/useStaleStore';
-import { applyVaultRename } from '../../services/vaultApi';
+import { applyVaultRename, deleteVaultFile } from '../../services/vaultApi';
 import { useT } from '../../utils/i18n';
 
 // TopBar — back button + AICartographer title + stale-asset badge (left),
@@ -11,6 +11,22 @@ import { useT } from '../../utils/i18n';
 //
 // The stale badge sits in topbar-left, on purpose: the original right-side
 // placement was too far from the user's gaze line to draw attention.
+//
+// Per-event Apply semantics:
+//   renamed → rename .md (preserves NOTES) + update frontmatter
+//   removed → delete the .md outright (asset is gone, the note is moot)
+//   added   → no .md exists yet; user dismisses and runs Framework scan
+//             from Settings to mint a skeleton.  We don't auto-scan because
+//             the user might be batching multiple new assets.
+//   updated → no .md change required at this layer; user dismisses, then
+//             reruns Framework scan or per-node Deep reasoning later.
+
+type ActionStatus = 'idle' | 'busy' | 'ok' | 'error';
+interface ActionState {
+  status: ActionStatus;
+  message?: string;
+}
+
 export const TopBar: React.FC = () => {
   const t = useT();
   const setSearchOpen = useUIStore((s) => s.setSearchOpen);
@@ -25,12 +41,22 @@ export const TopBar: React.FC = () => {
   const staleByPath = useStaleStore((s) => s.staleByPath);
   const removeRename = useStaleStore((s) => s.removeRename);
   const removePath = useStaleStore((s) => s.removePath);
+  const clearAllStale = useStaleStore((s) => s.clearAll);
   const staleCount = staleByPath.size;
   const [staleOpen, setStaleOpen] = useState(false);
-  const [applying, setApplying] = useState<Set<string>>(new Set());
-  const [applyError, setApplyError] = useState<string | null>(null);
+  const [actions, setActions] = useState<Map<string, ActionState>>(new Map());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState<string | null>(null);
 
   const canGoBack = (activeTab?.history.length ?? 0) > 0;
+
+  const setEntryAction = (key: string, state: ActionState) => {
+    setActions((prev) => {
+      const next = new Map(prev);
+      next.set(key, state);
+      return next;
+    });
+  };
 
   // Title → relative_path index built from vault file list.  We use this
   // (not manifest.entries — which the current backend doesn't populate
@@ -42,13 +68,14 @@ export const TopBar: React.FC = () => {
     return idx;
   }, [files]);
 
+  // For renames, the vault note still lives under the OLD title until the
+  // user applies the rename.  For all other events the note (if any) is
+  // keyed by the current path.  Returns undefined when no .md exists, in
+  // which case the row's Apply button is hidden.
   const findRelativeFor = (entry: StaleEntry): string | undefined => {
-    // For renames, the vault note still lives under the OLD title until
-    // the user applies the rename — try previousPath first.
     if (entry.type === 'renamed' && entry.previousPath) {
       const oldName = assetName(entry.previousPath);
-      const rel = nameToRelative.get(oldName);
-      if (rel) return rel;
+      return nameToRelative.get(oldName);
     }
     return nameToRelative.get(assetName(entry.path));
   };
@@ -59,10 +86,20 @@ export const TopBar: React.FC = () => {
     [staleByPath],
   );
 
-  const renameableEntries = useMemo(
-    () => staleEntries.filter((e) => e.type === 'renamed' && !!e.previousPath && !!findRelativeFor(e)),
-    [staleEntries, nameToRelative],
-  );
+  const entryKey = (e: StaleEntry) => `${e.path}::${e.previousPath ?? ''}`;
+
+  // Counts of each kind of "actionable" entry — drives the Apply All summary.
+  const actionable = useMemo(() => {
+    let renames = 0, deletes = 0, dismissable = 0;
+    for (const e of staleEntries) {
+      if (e.type === 'renamed' && e.previousPath && findRelativeFor(e)) renames++;
+      else if (e.type === 'removed' && findRelativeFor(e)) deletes++;
+      else if (e.type === 'added' || e.type === 'updated') dismissable++;
+      // removed-but-no-vault-note also dismissable
+      else if (e.type === 'removed' && !findRelativeFor(e)) dismissable++;
+    }
+    return { renames, deletes, dismissable, total: staleEntries.length };
+  }, [staleEntries, nameToRelative]);
 
   const onStaleItemClick = (entry: StaleEntry) => {
     const rel = findRelativeFor(entry);
@@ -75,47 +112,113 @@ export const TopBar: React.FC = () => {
     setStaleOpen(false);
   };
 
-  // Apply a single rename: move the vault .md file to match the new asset
-  // name + update its frontmatter.  On success: clear the stale entry and
-  // refresh the vault index so the new file shows up in side panel.
+  // ---- Per-event apply handlers --------------------------------------------
+
+  // Apply a single rename: move the vault .md to match the new asset name,
+  // update its frontmatter (preserving body + NOTES).  Returns true on
+  // success so the caller can refresh the vault index.
   const onApplyRename = async (entry: StaleEntry): Promise<boolean> => {
     if (!projectRoot) return false;
     if (entry.type !== 'renamed' || !entry.previousPath) return false;
     const oldRel = findRelativeFor(entry);
+    const key = entryKey(entry);
     if (!oldRel) {
-      setApplyError(t({
-        en: `Vault note for ${assetName(entry.previousPath)} not found`,
-        zh: `找不到 ${assetName(entry.previousPath)} 的 vault 笔记`,
-      }));
+      setEntryAction(key, {
+        status: 'error',
+        message: t({
+          en: `No vault note found for ${assetName(entry.previousPath)}`,
+          zh: `找不到 ${assetName(entry.previousPath)} 的 vault 笔记`,
+        }),
+      });
       return false;
     }
     const newName = assetName(entry.path);
-    setApplying((s) => new Set(s).add(entry.path));
+    setEntryAction(key, { status: 'busy' });
     try {
       await applyVaultRename(projectRoot, oldRel, newName, entry.path);
       removeRename(entry.path, entry.previousPath);
+      setEntryAction(key, { status: 'ok' });
       return true;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      setApplyError(msg);
+      setEntryAction(key, { status: 'error', message: msg });
       return false;
-    } finally {
-      setApplying((s) => {
-        const next = new Set(s);
-        next.delete(entry.path);
-        return next;
-      });
     }
   };
 
-  const onApplyAll = async () => {
-    setApplyError(null);
-    let any = false;
-    for (const e of renameableEntries) {
-      const ok = await onApplyRename(e);
-      if (ok) any = true;
+  // Apply a single delete: remove the vault .md entirely.
+  const onApplyDelete = async (entry: StaleEntry): Promise<boolean> => {
+    if (!projectRoot) return false;
+    if (entry.type !== 'removed') return false;
+    const rel = findRelativeFor(entry);
+    const key = entryKey(entry);
+    if (!rel) {
+      // No vault note to delete — just dismiss the badge.
+      removePath(entry.path);
+      setEntryAction(key, { status: 'ok' });
+      return true;
     }
-    if (any) await loadIndex();      // refresh vault sidebar once at the end
+    setEntryAction(key, { status: 'busy' });
+    try {
+      await deleteVaultFile(projectRoot, rel);
+      removePath(entry.path);
+      setEntryAction(key, { status: 'ok' });
+      return true;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setEntryAction(key, { status: 'error', message: msg });
+      return false;
+    }
+  };
+
+  // Dismiss: remove the entry from the badge without touching the vault.
+  // For added/updated this is the primary action (the user enriches via
+  // Framework scan or Deep reasoning later).  For removed-without-note it
+  // is the only sensible action.
+  const onDismiss = (entry: StaleEntry) => {
+    if (entry.type === 'renamed' && entry.previousPath) {
+      removeRename(entry.path, entry.previousPath);
+    } else {
+      removePath(entry.path);
+    }
+  };
+
+  // ---- Bulk Apply All -------------------------------------------------------
+  // Walks every entry and applies the type-appropriate action: rename →
+  // applyRename, remove → deleteVault, added/updated → dismiss.  Errors are
+  // collected per-entry so a single failure doesn't abort the rest.
+  const onApplyAll = async () => {
+    if (!projectRoot) return;
+    setBulkBusy(true);
+    setBulkError(null);
+    let touched = false;
+    let errors = 0;
+    // Snapshot the entries — we mutate the store as we go.
+    const snapshot = staleEntries.slice();
+    for (const e of snapshot) {
+      let ok = false;
+      if (e.type === 'renamed' && e.previousPath && findRelativeFor(e)) {
+        ok = await onApplyRename(e);
+      } else if (e.type === 'removed') {
+        ok = await onApplyDelete(e);
+      } else {
+        // added / updated → dismiss
+        onDismiss(e);
+        ok = true;
+      }
+      if (ok) touched = true;
+      else errors++;
+    }
+    if (touched) {
+      try { await loadIndex(); } catch { /* sidebar refresh non-fatal */ }
+    }
+    if (errors > 0) {
+      setBulkError(t({
+        en: `${errors} change(s) failed — see per-row messages`,
+        zh: `${errors} 处变更未能应用 — 见每行错误`,
+      }));
+    }
+    setBulkBusy(false);
   };
 
   return (
@@ -148,8 +251,8 @@ export const TopBar: React.FC = () => {
                 letterSpacing: '0.01em',
               }}
               title={t({
-                en: 'Click to see which assets changed and apply / rescan',
-                zh: '点击查看哪些资产变更了，可一键应用或重扫',
+                en: 'Click to see which assets changed and apply / dismiss',
+                zh: '点击查看哪些资产变更了，可逐项应用或一键应用',
               })}
             >
               ⚠ {staleCount} {t({
@@ -169,9 +272,9 @@ export const TopBar: React.FC = () => {
                     position: 'absolute',
                     top: 'calc(100% + 6px)',
                     left: 0,
-                    minWidth: 420,
-                    maxWidth: 560,
-                    maxHeight: 500,
+                    minWidth: 460,
+                    maxWidth: 620,
+                    maxHeight: 540,
                     overflowY: 'auto',
                     background: 'var(--color-surface, #fff)',
                     border: '1px solid var(--color-border, rgba(0,0,0,0.12))',
@@ -188,6 +291,7 @@ export const TopBar: React.FC = () => {
                       justifyContent: 'space-between',
                       alignItems: 'center',
                       gap: 10,
+                      flexWrap: 'wrap',
                     }}
                   >
                     <span
@@ -204,10 +308,10 @@ export const TopBar: React.FC = () => {
                         zh: `自上次扫描以来 ${staleCount} 处变更`,
                       })}
                     </span>
-                    {renameableEntries.length > 1 && (
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                       <button
                         onClick={onApplyAll}
-                        disabled={applying.size > 0}
+                        disabled={bulkBusy}
                         style={{
                           padding: '4px 10px',
                           background: '#dc2626',
@@ -216,21 +320,44 @@ export const TopBar: React.FC = () => {
                           borderRadius: 6,
                           fontSize: 'var(--fs-xs)',
                           fontWeight: 700,
-                          cursor: applying.size > 0 ? 'wait' : 'pointer',
-                          opacity: applying.size > 0 ? 0.6 : 1,
+                          cursor: bulkBusy ? 'wait' : 'pointer',
+                          opacity: bulkBusy ? 0.6 : 1,
                         }}
                         title={t({
-                          en: 'Apply all detected renames to vault notes (preserves NOTES section)',
-                          zh: '把所有检测到的重命名应用到 vault 笔记（保留 NOTES 段）',
+                          en: 'Rename matched .md, delete .md for removed assets, dismiss the rest. Refreshes the file tree at the end.',
+                          zh: '一键应用：重命名匹配的 .md、删除已移除资产对应的 .md、其余项忽略。完成后刷新文件树。',
                         })}
                       >
-                        {applying.size > 0
+                        {bulkBusy
                           ? t({ en: 'Applying…', zh: '应用中…' })
-                          : t({ en: `Apply all ${renameableEntries.length} renames`, zh: `一键应用 ${renameableEntries.length} 处重命名` })}
+                          : t({
+                              en: `Apply all (${actionable.renames + actionable.deletes} ops · ${actionable.dismissable} dismiss)`,
+                              zh: `一键应用全部（${actionable.renames + actionable.deletes} 项操作 · ${actionable.dismissable} 项忽略）`,
+                            })}
                       </button>
-                    )}
+                      <button
+                        onClick={() => { clearAllStale(); setActions(new Map()); setBulkError(null); }}
+                        disabled={bulkBusy}
+                        style={{
+                          padding: '4px 10px',
+                          background: 'transparent',
+                          color: 'var(--color-text-muted, #666)',
+                          border: '1px solid rgba(0,0,0,0.15)',
+                          borderRadius: 6,
+                          fontSize: 'var(--fs-xs)',
+                          fontWeight: 600,
+                          cursor: bulkBusy ? 'wait' : 'pointer',
+                        }}
+                        title={t({
+                          en: 'Clear the badge without touching any vault file',
+                          zh: '仅清除徽标，不修改任何 vault 文件',
+                        })}
+                      >
+                        {t({ en: 'Dismiss all', zh: '全部忽略' })}
+                      </button>
+                    </div>
                   </div>
-                  {applyError && (
+                  {bulkError && (
                     <div
                       style={{
                         padding: '8px 14px',
@@ -240,7 +367,7 @@ export const TopBar: React.FC = () => {
                         borderBottom: '1px solid rgba(0,0,0,0.05)',
                       }}
                     >
-                      {applyError}
+                      {bulkError}
                     </div>
                   )}
                   <div
@@ -257,21 +384,22 @@ export const TopBar: React.FC = () => {
                       en: 'Type chips: ',
                       zh: '类型说明：',
                     })}
-                    <Chip color={typeColor('renamed')} label={t({ en: 'renamed', zh: '重命名' })} /> {t({ en: 'X → Y in editor', zh: '编辑器中改名' })} ·{' '}
-                    <Chip color={typeColor('removed')} label={t({ en: 'deleted', zh: '已删除' })} /> {t({ en: 'asset gone', zh: '资产已删除' })} ·{' '}
-                    <Chip color={typeColor('added')} label={t({ en: 'added', zh: '新增' })} /> {t({ en: 'new asset, no vault note yet', zh: '新资产，暂无笔记' })} ·{' '}
-                    <Chip color={typeColor('updated')} label={t({ en: 'updated', zh: '已修改' })} /> {t({ en: 'asset re-saved', zh: '资产已重新保存' })}
+                    <Chip color={typeColor('renamed')} label={t({ en: 'renamed', zh: '重命名' })} /> {t({ en: 'X → Y', zh: '编辑器中改名' })} ·{' '}
+                    <Chip color={typeColor('removed')} label={t({ en: 'deleted', zh: '已删除' })} /> {t({ en: 'asset gone — Apply removes the .md', zh: '资产已删除 — 应用即删除对应 .md' })} ·{' '}
+                    <Chip color={typeColor('added')} label={t({ en: 'added', zh: '新增' })} /> {t({ en: 'no .md yet — Dismiss then run Framework scan', zh: '暂无 .md — 忽略后到设置运行框架扫描' })} ·{' '}
+                    <Chip color={typeColor('updated')} label={t({ en: 'updated', zh: '已修改' })} /> {t({ en: 'asset re-saved — rescan to refresh', zh: '资产已重新保存 — 重新扫描以刷新' })}
                   </div>
                   <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
                     {staleEntries.map((e) => {
                       const rel = findRelativeFor(e);
                       const navigable = !!rel;
-                      const isApplying = applying.has(e.path);
+                      const key = entryKey(e);
+                      const action = actions.get(key);
                       const newName = assetName(e.path);
                       const oldName = e.previousPath ? assetName(e.previousPath) : '';
                       return (
                         <li
-                          key={e.path + ':' + (e.previousPath ?? '')}
+                          key={key}
                           style={{
                             padding: '10px 14px',
                             borderBottom: '1px solid rgba(0,0,0,0.05)',
@@ -279,7 +407,7 @@ export const TopBar: React.FC = () => {
                             justifyContent: 'space-between',
                             alignItems: 'center',
                             gap: 12,
-                            opacity: navigable || e.type === 'added' ? 1 : 0.7,
+                            opacity: action?.status === 'ok' ? 0.55 : 1,
                           }}
                         >
                           <div
@@ -325,35 +453,39 @@ export const TopBar: React.FC = () => {
                             >
                               {e.path}
                             </div>
+                            {action?.status === 'error' && action.message && (
+                              <div
+                                style={{
+                                  marginTop: 4,
+                                  fontSize: 'var(--fs-xs)',
+                                  color: '#b91c1c',
+                                  whiteSpace: 'normal',
+                                }}
+                              >
+                                {action.message}
+                              </div>
+                            )}
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                             <Chip color={typeColor(e.type)} label={typeLabel(e.type, t)} />
-                            {e.type === 'renamed' && navigable && (
-                              <button
-                                onClick={async () => {
+                            <ApplyButton
+                              entry={e}
+                              navigable={navigable}
+                              busy={action?.status === 'busy'}
+                              done={action?.status === 'ok'}
+                              t={t}
+                              onApply={async () => {
+                                if (e.type === 'renamed') {
                                   const ok = await onApplyRename(e);
                                   if (ok) await loadIndex();
-                                }}
-                                disabled={isApplying}
-                                style={{
-                                  padding: '4px 10px',
-                                  background: isApplying ? '#94a3b8' : '#dc2626',
-                                  color: '#fff',
-                                  border: 'none',
-                                  borderRadius: 6,
-                                  fontSize: 'var(--fs-xs)',
-                                  fontWeight: 700,
-                                  cursor: isApplying ? 'wait' : 'pointer',
-                                  whiteSpace: 'nowrap',
-                                }}
-                                title={t({
-                                  en: `Rename vault note ${oldName}.md → ${newName}.md and update its frontmatter (preserves NOTES section)`,
-                                  zh: `把 vault 笔记 ${oldName}.md 改名为 ${newName}.md 并更新 frontmatter（保留 NOTES 段）`,
-                                })}
-                              >
-                                {isApplying ? t({ en: '…', zh: '…' }) : t({ en: 'Apply', zh: '应用变更' })}
-                              </button>
-                            )}
+                                } else if (e.type === 'removed') {
+                                  const ok = await onApplyDelete(e);
+                                  if (ok) await loadIndex();
+                                } else {
+                                  onDismiss(e);
+                                }
+                              }}
+                            />
                           </div>
                         </li>
                       );
@@ -397,6 +529,81 @@ export const TopBar: React.FC = () => {
         >▤</button>
       </div>
     </div>
+  );
+};
+
+const ApplyButton: React.FC<{
+  entry: StaleEntry;
+  navigable: boolean;
+  busy: boolean;
+  done: boolean;
+  t: ReturnType<typeof useT>;
+  onApply: () => void | Promise<void>;
+}> = ({ entry, navigable, busy, done, t, onApply }) => {
+  // Different verbs / colors per event type so the user immediately sees
+  // *what* the click will do.  Renames need a vault note to act on; deletes
+  // and dismisses always work.
+  let label: string;
+  let title: string;
+  let bg: string;
+  let disabled = busy || done;
+
+  if (done) {
+    label = t({ en: '✓ done', zh: '✓ 已应用' });
+    title = t({ en: 'Already applied', zh: '已经应用' });
+    bg = '#16a34a';
+  } else if (entry.type === 'renamed') {
+    label = busy ? t({ en: '…', zh: '…' }) : t({ en: 'Apply rename', zh: '应用重命名' });
+    title = t({
+      en: 'Rename the .md to match the new asset name and update its frontmatter (preserves NOTES)',
+      zh: '把 .md 改名为新资产名并更新 frontmatter（保留 NOTES 段）',
+    });
+    bg = busy ? '#94a3b8' : '#dc2626';
+    if (!navigable) disabled = true;
+  } else if (entry.type === 'removed') {
+    label = busy
+      ? t({ en: '…', zh: '…' })
+      : navigable
+        ? t({ en: 'Delete .md', zh: '删除 .md' })
+        : t({ en: 'Dismiss', zh: '忽略' });
+    title = navigable
+      ? t({ en: 'Asset is gone — also remove its vault .md file', zh: '资产已删除 — 同步删除对应 .md 文件' })
+      : t({ en: 'No vault note to delete; remove the badge', zh: '没有对应笔记可删；仅清除徽标' });
+    bg = busy ? '#94a3b8' : navigable ? '#7f1d1d' : '#475569';
+  } else {
+    // added / updated — primary action is dismiss.  User runs Framework
+    // scan from Settings to mint / refresh the .md.
+    label = t({ en: 'Dismiss', zh: '忽略' });
+    title = t({
+      en: entry.type === 'added'
+        ? 'New asset — dismiss this badge, then run "Scan project structure" in Settings to create its skeleton .md'
+        : 'Asset re-saved — dismiss this badge, then run "Scan project structure" or per-node Deep reasoning to refresh',
+      zh: entry.type === 'added'
+        ? '新资产 — 先忽略此徽标，到设置中运行"扫描项目结构"以生成骨架 .md'
+        : '资产已重新保存 — 先忽略此徽标，到设置中运行"扫描项目结构"或节点级 Deep reasoning 刷新',
+    });
+    bg = '#475569';
+  }
+
+  return (
+    <button
+      onClick={() => { void onApply(); }}
+      disabled={disabled}
+      style={{
+        padding: '4px 10px',
+        background: disabled && !done ? '#cbd5e1' : bg,
+        color: '#fff',
+        border: 'none',
+        borderRadius: 6,
+        fontSize: 'var(--fs-xs)',
+        fontWeight: 700,
+        cursor: disabled ? (busy ? 'wait' : 'not-allowed') : 'pointer',
+        whiteSpace: 'nowrap',
+      }}
+      title={title}
+    >
+      {label}
+    </button>
   );
 };
 

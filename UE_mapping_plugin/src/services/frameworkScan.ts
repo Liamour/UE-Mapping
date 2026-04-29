@@ -28,6 +28,7 @@ import {
   type BridgeAssetEntry,
   type BridgeDeepScanResult,
 } from './bridgeApi';
+import { listVault, readVaultFile } from './vaultApi';
 import { extractNotes, stripFrontmatter } from '../utils/frontmatter';
 
 const FRAMEWORK_SCAN_CONCURRENCY = 8;
@@ -78,6 +79,14 @@ export async function runFrameworkScan(
     signal,
   );
 
+  // Build an asset_path → existing-vault-relative-path map.  Lets us preserve
+  // the user's manual organisation: if a .md was hand-moved into a custom
+  // folder, this scan rewrites it in place instead of dropping a fresh copy
+  // at the deterministic Blueprints/<Name>.md path and orphaning the move.
+  // Same idea for system markdowns under Systems/<id>.md — if the user has
+  // renamed/moved them, we look them up by `system_id` frontmatter.
+  const existingByAsset = await buildExistingVaultIndex(projectRoot);
+
   // Step 1: per-blueprint skeleton .md files. Each member writes its own file
   // and uses the full fingerprint set as the title→name index for edge mapping.
   const totalToWrite = fingerprints.length + countSystems(fingerprints);
@@ -87,7 +96,8 @@ export async function runFrameworkScan(
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     const entry = fingerprints[i];
     try {
-      const relPath = vaultPathFor(entry);
+      const existingPath = existingByAsset.byAsset.get(entry.asset_path);
+      const relPath = existingPath ?? vaultPathFor(entry);
       const existingNotes = await loadExistingNotes(projectRoot, relPath);
       const md = renderSkeletonMd(entry, fingerprints, existingNotes);
       await bridgeWriteVaultFile(projectRoot, relPath, md);
@@ -108,7 +118,8 @@ export async function runFrameworkScan(
   for (const [systemId, members] of grouped) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
     try {
-      const relPath = systemVaultPathFor(systemId);
+      const existingPath = existingByAsset.bySystem.get(systemId);
+      const relPath = existingPath ?? systemVaultPathFor(systemId);
       const existingNotes = await loadExistingNotes(projectRoot, relPath);
       const md = renderSystemSkeletonMd(systemId, members, existingNotes);
       await bridgeWriteVaultFile(projectRoot, relPath, md);
@@ -445,4 +456,52 @@ function yamlScalar(s: string): string {
 function formatError(e: unknown): string {
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+// ---- Existing-vault index --------------------------------------------------
+// Walks every .md in the vault and builds:
+//   byAsset[asset_path] = relative_path        — preserves user-moved per-BP notes
+//   bySystem[system_id]  = relative_path       — preserves user-renamed Systems/*.md
+// Failures are tolerated quietly: a corrupt or non-frontmatter file just
+// doesn't show up in the index and the scan falls back to the deterministic
+// path (which then overwrites the bad file — desired).
+
+interface ExistingVaultIndex {
+  byAsset: Map<string, string>;
+  bySystem: Map<string, string>;
+}
+
+async function buildExistingVaultIndex(projectRoot: string): Promise<ExistingVaultIndex> {
+  const byAsset = new Map<string, string>();
+  const bySystem = new Map<string, string>();
+  let listing;
+  try {
+    listing = await listVault(projectRoot);
+  } catch {
+    return { byAsset, bySystem };
+  }
+  if (!listing.exists) return { byAsset, bySystem };
+
+  // Read every .md (skip _meta/* and _systems/* — those are legacy aggregates,
+  // not user content).  Reads run sequentially to avoid hammering the bridge;
+  // first scan populates the cache so this is one-time-per-scan cost.
+  for (const f of listing.files) {
+    const top = f.relative_path.split('/')[0] ?? '';
+    if (top === '_meta' || top === '_systems') continue;
+    try {
+      const file = await readVaultFile(projectRoot, f.relative_path);
+      const fm = file.frontmatter as Record<string, unknown>;
+      const assetPath = typeof fm.asset_path === 'string' ? fm.asset_path : '';
+      if (assetPath) {
+        byAsset.set(assetPath, f.relative_path);
+      }
+      const systemId = typeof fm.system_id === 'string' ? fm.system_id : '';
+      if (systemId && fm.node_type === 'System') {
+        bySystem.set(systemId, f.relative_path);
+      }
+    } catch {
+      // skip — file will be (re)written at deterministic path on this scan
+    }
+  }
+  return { byAsset, bySystem };
 }

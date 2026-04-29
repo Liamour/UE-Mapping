@@ -1078,6 +1078,43 @@ async def vault_apply_rename(req: ApplyRenameRequest):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Delete vault file — applied for `removed` stale events.
+# ─────────────────────────────────────────────────────────────────────────────
+# Wired to the TopBar stale-asset dropdown's Apply button on a deleted asset.
+# Removes the .md file (path-traversal-checked).  NOTES live in the same file
+# so they go away too — that's intended: the asset is gone, the note is moot.
+
+class DeleteVaultFileRequest(BaseModel):
+    project_root: str
+    relative_path: str
+
+
+@app.post("/api/v1/vault/delete-file")
+async def vault_delete_file(req: DeleteVaultFileRequest):
+    try:
+        return vault_writer.delete_vault_file(req.project_root, req.relative_path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"delete-file failed: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Find vault note by asset_path — used by framework-scan to preserve a user's
+# manually-organised folder structure.  If a .md exists anywhere in vault with
+# `asset_path: <X>` in its frontmatter, return that relative path so the next
+# scan can rewrite it in place instead of dropping a fresh copy at the
+# deterministic Blueprints/<Name>.md and orphaning the user's moved file.
+
+@app.get("/api/v1/vault/find-by-asset")
+async def vault_find_by_asset(project_root: str, asset_path: str):
+    rel = vault_writer.find_vault_note_for_asset(project_root, asset_path)
+    return {"asset_path": asset_path, "relative_path": rel}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Vault export — bundle the entire vault into a single JSON document
 # ─────────────────────────────────────────────────────────────────────────────
 # Lets users hand the project graph to any external LLM (ChatGPT web, Claude.ai)

@@ -1038,3 +1038,61 @@ def apply_rename(
         "new_relative_path": str(new_path.relative_to(root)).replace("\\", "/"),
         "previous_asset_path": previous_asset_path,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Delete-vault-file — remove a single .md from the vault.
+# ─────────────────────────────────────────────────────────────────────────────
+# Wired to the TopBar stale dropdown's "Delete vault note" button (the Apply
+# action for a `removed` event).  Path is normalised + path-traversal-checked
+# against vault_root.  Returns {ok, deleted_relative_path} on success, raises
+# FileNotFoundError if the file is already gone.
+
+def delete_vault_file(project_root: str, relative_path: str) -> Dict[str, Any]:
+    root = vault_root(project_root).resolve()
+    target = (root / relative_path).resolve()
+    if not str(target).startswith(str(root)):
+        raise ValueError(f"Path traversal denied: {relative_path}")
+    if not target.exists():
+        raise FileNotFoundError(f"Vault note not found: {relative_path}")
+    if target.is_dir():
+        raise ValueError(f"Refusing to delete directory: {relative_path}")
+    target.unlink()
+    return {
+        "ok": True,
+        "deleted_relative_path": str(target.relative_to(root)).replace("\\", "/"),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# find_vault_note_for_asset — look up an existing vault .md by asset_path.
+# ─────────────────────────────────────────────────────────────────────────────
+# Used by framework-scan to honour user-organised folder structures: if a node
+# already has a .md file *somewhere* in the vault (regardless of subdir), the
+# next scan should re-write that file in place rather than dropping a fresh
+# copy at the deterministic Blueprints/<Name>.md path and orphaning the user's
+# moved file.  Returns the relative path (with forward slashes) or None.
+
+def find_vault_note_for_asset(project_root: str, asset_path: str) -> Optional[str]:
+    if not asset_path:
+        return None
+    root = vault_root(project_root).resolve()
+    if not root.exists():
+        return None
+    for md in root.rglob("*.md"):
+        try:
+            text = md.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not text.startswith("---\n"):
+            continue
+        end = text.find("\n---\n", 4)
+        if end == -1:
+            continue
+        try:
+            fm = yaml.safe_load(text[4:end]) or {}
+        except yaml.YAMLError:
+            continue
+        if isinstance(fm, dict) and fm.get("asset_path") == asset_path:
+            return str(md.relative_to(root)).replace("\\", "/")
+    return None
