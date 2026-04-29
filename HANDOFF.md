@@ -1352,3 +1352,103 @@ vault 不进 git → README 必须新增章节明示：
 4. A2 完成后立即重写 narrative prompt（B 投资）→ 跑一次完整扫描验证 body 质量提升
 5. A3 等 A2 merge
 
+---
+
+## 20. Session 2026-04-29（深夜段·阶段 A 启动）— A1 + A2 桥接层落地
+
+> §19.5 同期开 A1 + A2。本节固化「这次 session 实际做到什么」+「用户必须做什么才能看到效果」+「下次 session 该接着做什么」。**§19.4 建议的分支策略未采用**：直接 commit 到 master，因为 A1/A2 都集中在 bridge.cpp/h + bridgeApi.ts，分支 + 后续 merge 比直接 commit 更费事。
+
+### 20.1 A1 落地范围（commit `b8acbd8`）
+
+**已做**：
+- `AICartographerBridge.h`: `GetStaleEventsSince(int64)` UFUNCTION + 私有 `FStaleEvent` 结构 + 1024 ring buffer + monotonic counter + `OnAssetRenamed/Removed` 委托句柄
+- `AICartographerBridge.cpp`: `EnsureAssetRegistryListenersRegistered()` 懒初始化 + `HandleAssetRenamed/Removed` 委托回调 + `GetStaleEventsSince` JSON 序列化
+- `bridgeApi.ts`: `BridgeStaleEvent / BridgeStaleEventsResult` types + `bridgeGetStaleEventsSince()` + `isStaleListenerAvailable()`
+
+**MVP 收口决策**：
+- **只做 OnAssetRenamed + OnAssetRemoved 两个事件** —— Added / Updated 留给后续 PR（最常见的"vault 找不到对应资产"窟窿已堵）
+- **懒初始化** —— 委托在第一次 `GetStaleEventsSince` 调用时注册，**编辑器打开后到首次 poll 之间（~30s）的事件会丢**。AddUObject 用弱引用，UObject 销毁时引擎自动失效绑定，**无需 BeginDestroy 显式反注册**
+
+**未做（明确延后）**：
+- ❌ 30s 轮询 loop（前端 service 模块未建）
+- ❌ `useStaleStore` Zustand store
+- ❌ Lv2/Lv3 红点角标 UI + tooltip
+- ❌ 持久化：把 `stale: true` 写回 vault frontmatter（plugin 重载后保留）
+
+### 20.2 A2 落地范围（commit `d742020`）
+
+**已做**：
+- `AICartographerBridge.h`: `GetReflectionAssetSummary(FString)` UFUNCTION 声明
+- `AICartographerBridge.cpp`: 匿名命名空间新增 `FunctionFlagsToTokens / PropertyFlagsToTokens / ExtractExportFunctions / ExtractDeclaredProperties` 4 个 helper + `GetReflectionAssetSummary` 主实现，返回 §19.3 AssetSummary 完整 schema：
+  - `exports`：UClass FuncMap walk（仅声明的，不含继承）+ flag tokens
+  - `properties`：FProperty walk + type + flag tokens
+  - `components`：复用文件内已有的 `ExtractComponents` SCS walker
+  - `edges.hard_refs / soft_refs`：`AssetRegistry::GetDependencies` + `/Game/` 过滤
+  - `edges.interfaces`：`BP->ImplementedInterfaces` 路径列表
+  - `ast_hash`：复用文件内 `ComputeBlueprintAstHash`
+  - `scanned_at`：`FDateTime::UtcNow().ToIso8601()`
+- `bridgeApi.ts`: `BridgeFunctionExport / BridgePropertyEntry / BridgeAssetSummaryEdges / BridgeAssetSummary` types + `bridgeGetReflectionAssetSummary()` + `isReflectionSummaryAvailable()`
+
+**MVP 收口决策**：
+- **只做 BP fast-path（带 BPGC 加载）** —— DataAsset / WBP / Niagara 在 Phase B 通过扩 ClassPath 过滤来覆盖
+- **函数参数签名 flags-only** —— `return_type` / `params[]` 留给 Phase B 一起做（与 narrative prompt 重写绑定）
+
+**未做（明确延后）**：
+- ❌ `analyze_one_node` 3 阶段重构（Reflection → narrative → write） —— 这是 A2 的"业务价值落地"，目前桥接层已就位，等 Phase B 一起做
+- ❌ 函数 `return_type` + `params[]` 详情
+- ❌ AssetRegistry-tags-only 超快路径（不加载 BPGC，仅冷启动扫描时使用）
+
+### 20.3 用户必须做的事（不做就看不到效果）
+
+**重新编译 C++ 插件** —— A1 + A2 都新增了 UFUNCTION，UE Live Coding **不能**注册新 UFUNCTION。必须：
+
+1. 关闭 UE 编辑器
+2. 在 IDE（VS / Rider）里 build C++ 项目：右键 .uproject → Generate Visual Studio project files（如有需要）→ Build solution
+3. 重新打开 UE
+4. 在 Settings 面板的 Bridge diagnostics 里应该能看到新方法：`getstaleeventssince`、`getreflectionassetsummary`
+
+如果 build 失败，最可能的两个原因：
+- `UE::AssetRegistry::EDependencyCategory / FDependencyQuery` 命名空间不可见 → 在 cpp 顶部加 `#include "AssetRegistry/AssetRegistryHelpers.h"`
+- `TFieldIterator<FProperty>` 不可见 → 加 `#include "UObject/UnrealType.h"`
+
+两个都是常见的 UE5 transitively-included 头，UE5.7 默认应该都能从 `Engine/Blueprint.h` + `UObject/Class.h` 拿到。
+
+### 20.4 下次 session 起点
+
+按优先级：
+
+#### P1：A1 前端集成（让 stale 监听 actually 显示给用户）
+- 新建 `services/staleSync.ts`：`window.setInterval` 每 30s 调 `bridgeGetStaleEventsSince(latestKnownCounter)`，把返回的 events 累积到 store
+- 新建 `store/useStaleStore.ts`（Zustand）：维护 `stalePaths: Set<string>` + `latestCounter: number`
+- 在 `App.tsx` 顶层 mount 时启动 polling
+- Lv2BlueprintFocus / Lv3FunctionFlow：当前 asset 在 `stalePaths` 里时显示红点 + tooltip "工程已变更，建议重扫"
+- Settings 面板加按钮"只重扫 stale" → 调既有 batch 扫描 endpoint + paths 过滤
+
+#### P2：A2 业务集成（让 Reflection 真的替代 LLM 抽取）
+- 改 `backend/main.py::analyze_one_node`：3 阶段化
+  1. 从 frontend 收来的 `node.ast_data` 现在已经够丰富（P0 commit 已经 propagate），**但 Reflection 的 properties + function flags 是新增信息**
+  2. 让 frontend 在 batch scan 时 *额外* 调 `bridgeGetReflectionAssetSummary` 把 properties + flag-rich exports 也塞进 ast_data
+  3. backend 把这些塞进 NodeRecord（vault_writer 已经支持 components；需要新增 properties 字段）
+- **同期开做 B：narrative prompt 重写** —— 现在 prompt 已经知道结构，可以更专心写 INTENT / EXECUTION / INTERACTIONS。**预算不限 → 双轮 critique / 更长 context / 更贵模型可以上**
+
+#### P3：A3（第 5 级视图）
+- 等 P2 落定后开工。BFS 数据模型 + Lv5 UI + concentric d3-force 布局。
+
+#### P4：A1 持久化 + Added/Updated 事件
+- A1 stale flag 写回 frontmatter（vault_writer 加 `mark_node_stale` 函数 + main.py 加 endpoint）
+- 注册 OnAssetAdded + OnAssetUpdated 委托
+
+### 20.5 commit 记录（这次 session）
+
+```
+d742020 feat(bridge): A2 reflection-derived asset summary endpoint (BP fast path)
+b8acbd8 feat(bridge): A1 AssetRegistry stale-asset listener foundation
+1908e6c docs(handoff): §15-§19 — features delivered + senior UE5 review + Phase A spec
+7374079 docs(readme): clarify vault is per-developer, not committed to git
+fec94c3 feat(export): one-click vault JSON export with browser download
+92f245d feat(bridge): widen WBP/AnimBP filter + OpenInEditor jump-to-UE
+0370510 feat(scan): preserve exports/components/edges through batch + extract scanPayload helper
+```
+
+7 个 commit 一气呵成：3 段 §15 features（P0/P1/P2）+ README + HANDOFF §15-§19 + A1 + A2。
+
