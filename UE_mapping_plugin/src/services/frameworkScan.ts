@@ -183,8 +183,15 @@ function vaultPathFor(entry: BridgeDeepScanResult): string {
 }
 
 function subdirForType(nodeType: string): string {
+  // Mirror backend/vault_writer.py NODE_TYPE_TO_SUBDIR.  When the C++ bridge
+  // surfaces new flavours (WidgetBlueprint / AnimBlueprint / Libraries) keep
+  // both sides in sync — the LLM batch scan path uses the backend mapping
+  // for is_unchanged() lookup, framework-scan uses this one.
   if (nodeType === 'Interface') return 'Interfaces';
   if (nodeType === 'Component') return 'Components';
+  if (nodeType === 'WidgetBlueprint') return 'Widgets';
+  if (nodeType === 'AnimBlueprint') return 'Anims';
+  if (nodeType === 'FunctionLibrary' || nodeType === 'MacroLibrary') return 'Libraries';
   return 'Blueprints';
 }
 

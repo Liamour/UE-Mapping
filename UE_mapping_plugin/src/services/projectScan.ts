@@ -24,11 +24,10 @@ import {
   pollScanUntilDone,
   BackendUnreachableError,
   BackendDegradedError,
-  type ScanBatchNode,
-  type ScanBatchEdge,
   type ScanStatus,
   type ProviderConfigPayload,
 } from './scanApi';
+import { buildScanNodeFromBridge } from './scanPayload';
 
 const DEEP_SCAN_CONCURRENCY = 8;
 
@@ -114,15 +113,14 @@ export async function runProjectScan(opts: ProjectScanOptions): Promise<ProjectS
         const assetPathToName: Record<string, string> = {};
         for (const r of fresh) assetPathToName[r.asset_path] = r.name;
 
-        const payload: ScanBatchNode[] = fresh.map((r) => ({
-          node_id: deriveNodeId(r),
-          asset_path: r.asset_path,
-          title: r.name,
-          node_type: r.node_type,
-          parent_class: r.parent_class || undefined,
-          ast_data: { ast_hash: r.ast_hash, asset_path: r.asset_path },
-          outbound_edges: buildOutboundEdges(r, assetPathToName),
-        }));
+        // Build payload through the shared helper.  Both batch and single-node
+        // scan paths funnel through services/scanPayload.ts so they ship
+        // identical ast_data shapes (exports / components / edges) — the LLM
+        // and the vault writer see the same view of the AST regardless of
+        // which entry point triggered the scan.  See §15.7 in HANDOFF.md.
+        const payload = fresh.map((r) =>
+          buildScanNodeFromBridge(r, deriveNodeId(r), assetPathToName),
+        );
 
         onPhase({ kind: 'l2-submitting' });
         const { task_id } = await postScanBatch({
@@ -269,50 +267,5 @@ function formatError(e: unknown): string {
   return String(e);
 }
 
-// Convert C++ deep-scan edges into the backend's outbound_edges schema.
-// Drops targets that aren't in the scanned set (engine classes, plugin
-// content) since the L1/L2 graph can only render in-project links.  Dedups
-// (target, edge_type) tuples and accumulates `from_function → target_function`
-// labels so the LLM can see how often two BPs interact.
-//
-// Mirrors frameworkScan.ts mapEdgeKind so vault frontmatter has the same
-// edge_type vocabulary regardless of which scan path wrote the file.
-function buildOutboundEdges(
-  r: BridgeDeepScanResult,
-  assetPathToName: Record<string, string>,
-): ScanBatchEdge[] {
-  const out: ScanBatchEdge[] = [];
-  for (const e of r.edges ?? []) {
-    const targetName = assetPathToName[e.target_asset];
-    if (!targetName) continue;
-    const edgeType = mapEdgeKind(e.kind);
-    const refLabel = e.target_function
-      ? `${e.from_function} → ${e.target_function}`
-      : e.from_function;
-    const existing = out.find(
-      (x) => x.target === targetName && x.edge_type === edgeType,
-    );
-    if (existing) {
-      existing.refs ??= [];
-      if (refLabel && !existing.refs.includes(refLabel)) existing.refs.push(refLabel);
-    } else {
-      out.push({
-        target: targetName,
-        edge_type: edgeType,
-        refs: refLabel ? [refLabel] : [],
-      });
-    }
-  }
-  return out;
-}
-
-function mapEdgeKind(rawKind: string): string {
-  switch (rawKind) {
-    case 'call': return 'function_call';
-    case 'cast': return 'cast';
-    case 'spawn': return 'spawn';
-    case 'delegate': return 'listens_to';
-    case 'inherits': return 'inheritance';
-    default: return rawKind;
-  }
-}
+// (Edge mapping + outbound assembly moved to services/scanPayload.ts so
+// single-node Deep reasoning shares the exact same vocabulary.)

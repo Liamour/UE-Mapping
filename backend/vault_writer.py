@@ -132,6 +132,7 @@ class NodeRecord:
     exports_events: List[str] = field(default_factory=list)
     exports_dispatchers: List[str] = field(default_factory=list)
     variables: List[Dict[str, Any]] = field(default_factory=list)
+    components: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,6 +235,11 @@ def _build_frontmatter(
         fm["exports"] = exports
     if node.variables:
         fm["variables"] = node.variables
+    if node.components:
+        # Frontend Lv2BlueprintGraph reads components as internal nodes.
+        # Each entry is {name, class, parent} — written verbatim from the
+        # bridge's SCS walker.
+        fm["components"] = node.components
 
     # EDGES (AST-derived, typed) — grouped by edge_type
     if node.edges_out:

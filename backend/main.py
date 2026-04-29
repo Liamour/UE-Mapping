@@ -422,6 +422,13 @@ async def analyze_one_node(
     write_result = None
     if project_root:
         title = node.title or node.asset_path.split("/")[-1].split(".")[-1] or node.node_id
+        # Pull structured AST fields out of ast_data so write_node_file can
+        # persist them in the frontmatter `exports`, `components`, `variables`
+        # blocks.  The frontend (both batch and single-node paths) ships these
+        # under the same keys; missing keys are tolerated and default to [].
+        # Without this propagation the LLM scan wipes the framework-scan
+        # skeleton's exports/components — which is the bug §15 documents.
+        ast = node.ast_data if isinstance(node.ast_data, dict) else {}
         record = vault_writer.NodeRecord(
             node_id=node.node_id,
             title=title,
@@ -439,6 +446,11 @@ async def analyze_one_node(
             risk_level=parsed["risk_level"],
             tags=parsed["tags"],
             full_analysis_markdown=parsed["analysis_markdown"],
+            exports_functions=list(ast.get("exports_functions") or []),
+            exports_events=list(ast.get("exports_events") or []),
+            exports_dispatchers=list(ast.get("exports_dispatchers") or []),
+            variables=list(ast.get("variables") or []),
+            components=list(ast.get("components") or []),
         )
         write_result = vault_writer.write_node_file(
             project_root=project_root,
