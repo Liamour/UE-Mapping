@@ -1230,3 +1230,83 @@ TSharedPtr<FJsonObject> UAICartographerBridge::PurifyNodeToAST(UEdGraphNode* Nod
 
     return JsonObj;
 }
+
+
+// ─── A1: AssetRegistry stale-asset listener (HANDOFF §19.3) ─────────────────
+// Lazy-init pattern: register on first GetStaleEventsSince call.  Drop the
+// pre-init events (~30s window after editor open) — Phase A1 MVP accepts this.
+// AddUObject keeps a weak ref; UE auto-invalidates the binding when this
+// UObject is destroyed, so no explicit BeginDestroy unregister is required.
+
+void UAICartographerBridge::EnsureAssetRegistryListenersRegistered()
+{
+    if (bAssetRegistryListenersRegistered) return;
+
+    FAssetRegistryModule& Module = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    IAssetRegistry& Registry = Module.Get();
+
+    OnAssetRenamedHandle = Registry.OnAssetRenamed().AddUObject(this, &UAICartographerBridge::HandleAssetRenamed);
+    OnAssetRemovedHandle = Registry.OnAssetRemoved().AddUObject(this, &UAICartographerBridge::HandleAssetRemoved);
+
+    bAssetRegistryListenersRegistered = true;
+    UE_LOG(LogTemp, Log, TEXT("[BRIDGE] AssetRegistry stale listeners registered (renamed + removed)"));
+}
+
+void UAICartographerBridge::HandleAssetRenamed(const FAssetData& AssetData, const FString& OldObjectPath)
+{
+    StaleEventCounter++;
+    FStaleEvent Ev;
+    Ev.Counter = StaleEventCounter;
+    Ev.Type = TEXT("renamed");
+    Ev.Path = AssetData.GetObjectPathString();
+    Ev.OldPath = OldObjectPath;
+    Ev.TimestampSec = FPlatformTime::Seconds();
+    StaleEventBuffer.Add(Ev);
+    if (StaleEventBuffer.Num() > 1024)
+    {
+        StaleEventBuffer.RemoveAt(0);
+    }
+}
+
+void UAICartographerBridge::HandleAssetRemoved(const FAssetData& AssetData)
+{
+    StaleEventCounter++;
+    FStaleEvent Ev;
+    Ev.Counter = StaleEventCounter;
+    Ev.Type = TEXT("removed");
+    Ev.Path = AssetData.GetObjectPathString();
+    Ev.TimestampSec = FPlatformTime::Seconds();
+    StaleEventBuffer.Add(Ev);
+    if (StaleEventBuffer.Num() > 1024)
+    {
+        StaleEventBuffer.RemoveAt(0);
+    }
+}
+
+FString UAICartographerBridge::GetStaleEventsSince(int64 SinceCounter)
+{
+    EnsureAssetRegistryListenersRegistered();
+
+    TSharedRef<FJsonObject> Obj = MakeShareable(new FJsonObject());
+    Obj->SetBoolField(TEXT("ok"), true);
+    Obj->SetNumberField(TEXT("latest_counter"), static_cast<double>(StaleEventCounter));
+
+    TArray<TSharedPtr<FJsonValue>> Events;
+    Events.Reserve(StaleEventBuffer.Num());
+    for (const FStaleEvent& Ev : StaleEventBuffer)
+    {
+        if (Ev.Counter <= SinceCounter) continue;
+        TSharedRef<FJsonObject> EvObj = MakeShareable(new FJsonObject());
+        EvObj->SetNumberField(TEXT("counter"), static_cast<double>(Ev.Counter));
+        EvObj->SetStringField(TEXT("type"), Ev.Type);
+        EvObj->SetStringField(TEXT("path"), Ev.Path);
+        if (!Ev.OldPath.IsEmpty())
+        {
+            EvObj->SetStringField(TEXT("old_path"), Ev.OldPath);
+        }
+        EvObj->SetNumberField(TEXT("timestamp_sec"), Ev.TimestampSec);
+        Events.Add(MakeShareable(new FJsonValueObject(EvObj)));
+    }
+    Obj->SetArrayField(TEXT("events"), Events);
+    return SerializeJson(Obj);
+}

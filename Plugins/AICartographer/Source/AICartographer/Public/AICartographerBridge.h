@@ -87,7 +87,36 @@ public:
     UFUNCTION(BlueprintCallable, Category = "AICartographer|Bridge")
     FString OpenInEditor(const FString& AssetPath, const FString& FunctionName);
 
+    // ─── A1: AssetRegistry stale-asset listener (HANDOFF §19.3) ─────────────
+    // Frontend polls every 30s passing the highest counter it has seen; we
+    // return events with counter > since.  Buffer caps at 1024; if the
+    // frontend falls behind, oldest events are silently dropped — frontend
+    // detects the gap and treats it as 'rescan everything'.  MVP wires up
+    // OnAssetRenamed + OnAssetRemoved only; Added / Updated follow up.
+    // Returns: {"ok": true, "latest_counter": N, "events": [{counter, type, path, old_path?, timestamp_sec}]}
+    UFUNCTION(BlueprintCallable, Category = "AICartographer|Stale")
+    FString GetStaleEventsSince(int64 SinceCounter);
+
 private:
+    // ── Stale-listener internal state (see GetStaleEventsSince above) ──
+    struct FStaleEvent
+    {
+        int64   Counter = 0;
+        FString Type;          // "renamed" | "removed" | (later) "added" | "updated"
+        FString Path;
+        FString OldPath;
+        double  TimestampSec = 0;
+    };
+    bool bAssetRegistryListenersRegistered = false;
+    int64 StaleEventCounter = 0;
+    TArray<FStaleEvent> StaleEventBuffer;
+    FDelegateHandle OnAssetRenamedHandle;
+    FDelegateHandle OnAssetRemovedHandle;
+
+    void EnsureAssetRegistryListenersRegistered();
+    void HandleAssetRenamed(const struct FAssetData& AssetData, const FString& OldObjectPath);
+    void HandleAssetRemoved(const struct FAssetData& AssetData);
+
     // 节点净化为AST JSON格式
     TSharedPtr<class FJsonObject> PurifyNodeToAST(class UEdGraphNode* Node);
 };

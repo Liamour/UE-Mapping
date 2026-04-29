@@ -22,6 +22,8 @@ interface AICartographerBridge {
   readblueprintfunctionflow?: (assetPath: string, functionName: string) => Promise<string> | string;
 
   openineditor?: (assetPath: string, functionName: string) => Promise<string> | string;
+
+  getstaleeventssince?: (sinceCounter: number) => Promise<string> | string;
 }
 
 declare global {
@@ -307,4 +309,40 @@ export async function bridgeOpenInEditor(
 export function isOpenInEditorAvailable(): boolean {
   const b = getBridge();
   return typeof b?.openineditor === 'function';
+}
+
+// ---- A1: AssetRegistry stale-asset listener (HANDOFF §19.3) ---------------
+// The bridge tails AssetRegistry events (Renamed / Removed in the MVP) into
+// a 1024-entry ring buffer.  The frontend polls every 30s with the highest
+// counter it has seen and applies the new events to its in-memory stale set.
+// If `since` falls below the buffer's oldest counter (events were dropped),
+// the frontend should treat that as 'rescan everything' — the latest_counter
+// returned still moves forward, so the next poll resyncs.
+
+export interface BridgeStaleEvent {
+  counter: number;
+  type: 'renamed' | 'removed' | 'added' | 'updated';
+  path: string;             // current object path (post-rename for 'renamed')
+  old_path?: string;        // populated only for 'renamed'
+  timestamp_sec: number;    // FPlatformTime::Seconds at push
+}
+
+export interface BridgeStaleEventsResult {
+  ok: true;
+  latest_counter: number;
+  events: BridgeStaleEvent[];
+}
+
+export async function bridgeGetStaleEventsSince(sinceCounter: number = 0): Promise<BridgeStaleEventsResult> {
+  const b = getBridge();
+  if (!b?.getstaleeventssince) throw new Error('getstaleeventssince not bound (rebuild C++ plugin)');
+  return callBridgeJSON<BridgeStaleEventsResult>(
+    b.getstaleeventssince(sinceCounter),
+    'getstaleeventssince',
+  );
+}
+
+export function isStaleListenerAvailable(): boolean {
+  const b = getBridge();
+  return typeof b?.getstaleeventssince === 'function';
 }
