@@ -24,6 +24,8 @@ interface AICartographerBridge {
   openineditor?: (assetPath: string, functionName: string) => Promise<string> | string;
 
   getstaleeventssince?: (sinceCounter: number) => Promise<string> | string;
+
+  getreflectionassetsummary?: (assetPath: string) => Promise<string> | string;
 }
 
 declare global {
@@ -345,4 +347,53 @@ export async function bridgeGetStaleEventsSince(sinceCounter: number = 0): Promi
 export function isStaleListenerAvailable(): boolean {
   const b = getBridge();
   return typeof b?.getstaleeventssince === 'function';
+}
+
+// ---- A2: Reflection-derived asset summary (HANDOFF §19.3) -----------------
+// Replaces what the LLM used to fragilely extract from k2node dumps.  The
+// bridge walks UClass + AssetRegistry so structural fields land 100% precise.
+// MVP returns BP-only; DataAsset / WBP / Niagara extensions follow in Phase B.
+
+export interface BridgeFunctionExport {
+  name: string;
+  flags: string[];           // BlueprintCallable / BlueprintEvent / BlueprintPure / Net / Static / ...
+}
+
+export interface BridgePropertyEntry {
+  name: string;
+  type: string;              // CPP type token, e.g. "int32", "TArray<UStaticMeshComponent*>"
+  flags: string[];           // EditAnywhere / BlueprintReadOnly / BlueprintReadWrite / Replicated / ...
+}
+
+export interface BridgeAssetSummaryEdges {
+  hard_refs: string[];       // package names under /Game/
+  soft_refs: string[];
+  interfaces: string[];      // implemented UClass pathnames
+}
+
+export interface BridgeAssetSummary {
+  ok: true;
+  asset_path: string;
+  class_path: string;
+  parent_class: string;
+  ast_hash: string;
+  scanned_at: string;        // ISO-8601 UTC
+  exports: BridgeFunctionExport[];
+  properties: BridgePropertyEntry[];
+  components: BridgeComponentEntry[];
+  edges: BridgeAssetSummaryEdges;
+}
+
+export async function bridgeGetReflectionAssetSummary(assetPath: string): Promise<BridgeAssetSummary> {
+  const b = getBridge();
+  if (!b?.getreflectionassetsummary) throw new Error('getreflectionassetsummary not bound (rebuild C++ plugin)');
+  return callBridgeJSON<BridgeAssetSummary>(
+    b.getreflectionassetsummary(assetPath),
+    'getreflectionassetsummary',
+  );
+}
+
+export function isReflectionSummaryAvailable(): boolean {
+  const b = getBridge();
+  return typeof b?.getreflectionassetsummary === 'function';
 }

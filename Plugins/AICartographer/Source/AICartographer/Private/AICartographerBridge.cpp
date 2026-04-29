@@ -1310,3 +1310,174 @@ FString UAICartographerBridge::GetStaleEventsSince(int64 SinceCounter)
     Obj->SetArrayField(TEXT("events"), Events);
     return SerializeJson(Obj);
 }
+
+
+// ─── A2: Reflection-derived asset summary (HANDOFF §19.3) ───────────────────
+// Returns a structurally-precise summary of a BP asset by walking UClass +
+// AssetRegistry — no LLM, no fragility.  This is the "去 LLM 抽取" foundation
+// from §19.2; the analyze_one_node 3-stage refactor (which calls this) lands
+// in a follow-up PR coupled to the Phase B narrative-prompt rewrite.
+
+namespace
+{
+    // Subset of EFunctionFlags relevant to the narrative prompt.  Frontend
+    // treats flags[] as a set; order is informational.
+    static TArray<FString> FunctionFlagsToTokens(EFunctionFlags Flags)
+    {
+        TArray<FString> Out;
+        if (Flags & FUNC_BlueprintCallable)  Out.Add(TEXT("BlueprintCallable"));
+        if (Flags & FUNC_BlueprintEvent)     Out.Add(TEXT("BlueprintEvent"));
+        if (Flags & FUNC_BlueprintPure)      Out.Add(TEXT("BlueprintPure"));
+        if (Flags & FUNC_Net)                Out.Add(TEXT("Net"));
+        if (Flags & FUNC_NetMulticast)       Out.Add(TEXT("NetMulticast"));
+        if (Flags & FUNC_NetServer)          Out.Add(TEXT("Server"));
+        if (Flags & FUNC_NetClient)          Out.Add(TEXT("Client"));
+        if (Flags & FUNC_NetReliable)        Out.Add(TEXT("Reliable"));
+        if (Flags & FUNC_Static)             Out.Add(TEXT("Static"));
+        if (Flags & FUNC_Exec)               Out.Add(TEXT("Exec"));
+        return Out;
+    }
+
+    // Subset of CPF_ flags relevant to read/write surface + replication.
+    // BlueprintReadWrite is synthesised: BlueprintVisible & !BlueprintReadOnly.
+    static TArray<FString> PropertyFlagsToTokens(uint64 Flags)
+    {
+        TArray<FString> Out;
+        if (Flags & CPF_Edit)                Out.Add(TEXT("EditAnywhere"));
+        if (Flags & CPF_BlueprintVisible)    Out.Add(TEXT("BlueprintReadOnly"));
+        if (Flags & CPF_BlueprintAssignable) Out.Add(TEXT("BlueprintAssignable"));
+        if (Flags & CPF_BlueprintCallable)   Out.Add(TEXT("BlueprintCallable"));
+        if ((Flags & CPF_BlueprintVisible) && !(Flags & CPF_BlueprintReadOnly))
+                                             Out.Add(TEXT("BlueprintReadWrite"));
+        if (Flags & CPF_Net)                 Out.Add(TEXT("Replicated"));
+        if (Flags & CPF_Transient)           Out.Add(TEXT("Transient"));
+        if (Flags & CPF_SaveGame)            Out.Add(TEXT("SaveGame"));
+        return Out;
+    }
+
+    // Walk UClass::FuncMap (declared funcs only, no inherited) and emit
+    // {name, flags:[...]} per function.  Param signatures (return + args) are
+    // deferred to Phase B alongside the narrative-prompt rewrite.
+    static void ExtractExportFunctions(UClass* Cls, TArray<TSharedPtr<FJsonValue>>& Out)
+    {
+        if (!Cls) return;
+        for (TFieldIterator<UFunction> It(Cls, EFieldIteratorFlags::ExcludeSuper); It; ++It)
+        {
+            UFunction* Fn = *It;
+            if (!Fn) continue;
+            TSharedRef<FJsonObject> Entry = MakeShareable(new FJsonObject());
+            Entry->SetStringField(TEXT("name"), Fn->GetName());
+            const TArray<FString> FlagTokens = FunctionFlagsToTokens(Fn->FunctionFlags);
+            TArray<TSharedPtr<FJsonValue>> Flags;
+            Flags.Reserve(FlagTokens.Num());
+            for (const FString& F : FlagTokens) Flags.Add(MakeShareable(new FJsonValueString(F)));
+            Entry->SetArrayField(TEXT("flags"), Flags);
+            Out.Add(MakeShareable(new FJsonValueObject(Entry)));
+        }
+    }
+
+    // Walk declared FProperty fields (no inherited) and emit {name, type, flags:[...]}.
+    static void ExtractDeclaredProperties(UClass* Cls, TArray<TSharedPtr<FJsonValue>>& Out)
+    {
+        if (!Cls) return;
+        for (TFieldIterator<FProperty> It(Cls, EFieldIteratorFlags::ExcludeSuper); It; ++It)
+        {
+            FProperty* P = *It;
+            if (!P) continue;
+            TSharedRef<FJsonObject> Entry = MakeShareable(new FJsonObject());
+            Entry->SetStringField(TEXT("name"), P->GetName());
+            Entry->SetStringField(TEXT("type"), P->GetCPPType());
+            const TArray<FString> FlagTokens = PropertyFlagsToTokens(P->PropertyFlags);
+            TArray<TSharedPtr<FJsonValue>> Flags;
+            Flags.Reserve(FlagTokens.Num());
+            for (const FString& F : FlagTokens) Flags.Add(MakeShareable(new FJsonValueString(F)));
+            Entry->SetArrayField(TEXT("flags"), Flags);
+            Out.Add(MakeShareable(new FJsonValueObject(Entry)));
+        }
+    }
+}
+
+FString UAICartographerBridge::GetReflectionAssetSummary(const FString& AssetPath)
+{
+    UE_LOG(LogTemp, Log, TEXT("[BRIDGE] GetReflectionAssetSummary: %s"), *AssetPath);
+
+    // Reuse the /Game path purification pattern from RequestDeepScan.
+    FString Clean = AssetPath;
+    {
+        const int32 GameIdx = Clean.Find(TEXT("/Game/"));
+        if (GameIdx == INDEX_NONE) return MakeErrorJson(TEXT("asset path missing /Game/"));
+        Clean = Clean.Mid(GameIdx);
+        FString Left, Right;
+        if (Clean.Split(TEXT(" "), &Left, &Right)) Clean = Left;
+        if (!Clean.Contains(TEXT("."))) return MakeErrorJson(TEXT("asset path missing object suffix (e.g. /Game/X/BP.BP)"));
+    }
+
+    UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *Clean);
+    if (!BP) return MakeErrorJson(FString::Printf(TEXT("LoadObject failed: %s"), *Clean));
+    UClass* Cls = BP->GeneratedClass;
+    if (!Cls) return MakeErrorJson(TEXT("Blueprint has no GeneratedClass (not yet compiled?)"));
+
+    TSharedRef<FJsonObject> Out = MakeShareable(new FJsonObject());
+    Out->SetBoolField(TEXT("ok"), true);
+    Out->SetStringField(TEXT("asset_path"), Clean);
+    Out->SetStringField(TEXT("class_path"), Cls->GetPathName());
+    Out->SetStringField(TEXT("parent_class"), BP->ParentClass ? BP->ParentClass->GetPathName() : FString());
+    Out->SetStringField(TEXT("ast_hash"), ComputeBlueprintAstHash(BP));
+    Out->SetStringField(TEXT("scanned_at"), FDateTime::UtcNow().ToIso8601());
+
+    // exports — UClass FuncMap walk
+    TArray<TSharedPtr<FJsonValue>> Exports;
+    ExtractExportFunctions(Cls, Exports);
+    Out->SetArrayField(TEXT("exports"), Exports);
+
+    // properties — declared FProperty walk
+    TArray<TSharedPtr<FJsonValue>> Props;
+    ExtractDeclaredProperties(Cls, Props);
+    Out->SetArrayField(TEXT("properties"), Props);
+
+    // components — reuse SCS walker from the same translation unit
+    TArray<TSharedPtr<FJsonValue>> Components;
+    ExtractComponents(BP, Components);
+    Out->SetArrayField(TEXT("components"), Components);
+
+    // edges — AssetRegistry hard / soft refs, plus implemented interfaces
+    FAssetRegistryModule& Module = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+    IAssetRegistry& Registry = Module.Get();
+    const FString PackagePath = FPackageName::ObjectPathToPackageName(Clean);
+    const FName PackageName(*PackagePath);
+
+    TArray<TSharedPtr<FJsonValue>> Hard, Soft;
+    {
+        TArray<FName> HardRefs, SoftRefs;
+        Registry.GetDependencies(PackageName, HardRefs,
+            UE::AssetRegistry::EDependencyCategory::Package,
+            UE::AssetRegistry::FDependencyQuery(UE::AssetRegistry::EDependencyQuery::Hard));
+        Registry.GetDependencies(PackageName, SoftRefs,
+            UE::AssetRegistry::EDependencyCategory::Package,
+            UE::AssetRegistry::FDependencyQuery(UE::AssetRegistry::EDependencyQuery::Soft));
+        for (const FName& N : HardRefs)
+        {
+            const FString S = N.ToString();
+            if (S.StartsWith(TEXT("/Game/"))) Hard.Add(MakeShareable(new FJsonValueString(S)));
+        }
+        for (const FName& N : SoftRefs)
+        {
+            const FString S = N.ToString();
+            if (S.StartsWith(TEXT("/Game/"))) Soft.Add(MakeShareable(new FJsonValueString(S)));
+        }
+    }
+
+    TArray<TSharedPtr<FJsonValue>> Interfaces;
+    for (const FBPInterfaceDescription& I : BP->ImplementedInterfaces)
+    {
+        if (I.Interface) Interfaces.Add(MakeShareable(new FJsonValueString(I.Interface->GetPathName())));
+    }
+
+    TSharedRef<FJsonObject> Edges = MakeShareable(new FJsonObject());
+    Edges->SetArrayField(TEXT("hard_refs"), Hard);
+    Edges->SetArrayField(TEXT("soft_refs"), Soft);
+    Edges->SetArrayField(TEXT("interfaces"), Interfaces);
+    Out->SetField(TEXT("edges"), MakeShareable(new FJsonValueObject(Edges)));
+
+    return SerializeJson(Out);
+}

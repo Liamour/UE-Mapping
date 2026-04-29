@@ -97,6 +97,19 @@ public:
     UFUNCTION(BlueprintCallable, Category = "AICartographer|Stale")
     FString GetStaleEventsSince(int64 SinceCounter);
 
+    // ─── A2: Reflection-derived asset summary (HANDOFF §19.3) ──────────────
+    // Loads a Blueprint asset and walks UClass via reflection to return
+    // exports / properties / components / edges as one JSON envelope.
+    // Replaces what the LLM used to fragilely extract from k2node dumps.
+    // MVP: BP-only.  DataAsset / WBP / Niagara extensions follow in Phase B.
+    // Function parameter signatures are flag-only in MVP; param-type detail
+    // joins this endpoint in the same Phase B PR.
+    // Returns: §19.3 AssetSummary JSON {asset_path, class_path, parent_class,
+    // exports[], properties[], components[], edges{hard_refs,soft_refs,interfaces},
+    // ast_hash, scanned_at}.
+    UFUNCTION(BlueprintCallable, Category = "AICartographer|Reflection")
+    FString GetReflectionAssetSummary(const FString& AssetPath);
+
 private:
     // ── Stale-listener internal state (see GetStaleEventsSince above) ──
     struct FStaleEvent
