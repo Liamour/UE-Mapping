@@ -25,7 +25,7 @@ Fold an entire UE5 project into a clickable, narratable, analyzable map — let 
 AICartographer is a React plugin embedded in the UE5 editor + a Python backend that uses an LLM to build a "narrative map" of every blueprint in your project:
 
 - **Not just another blueprint browser** — it tells stories: each BP's markdown page narrates "`OnDamageReceived` is broadcast when `CurrentHP <= 0`, consumed by `GameMode.HandleDeath`", instead of dryly listing variable names.
-- **Not just another AI tool** — it produces real assets that belong to your project: every LLM analysis, note, and tag lands in `<project>/.aicartographer/vault/` as `.md` files. Your git history travels with your project.
+- **Not just another AI tool** — it produces real assets that belong to your project: every LLM analysis, note, and tag lands in `<project>/.aicartographer/vault/` as `.md` files — **one local copy per developer**, not committed to git ([here's why and the onboarding flow](#team-collaboration-vault-is-per-developer)).
 - **Not a cloud tool** — both UE editor and backend run on your machine. LLM keys are entered by you and live only in `localStorage`.
 
 > Who's it for: developers handling medium-to-large UE5 projects, especially those who want to ramp up on someone else's code or revisit their own old projects. The first time you pull a 50+ blueprint project, this thing lets you skip 80% of the rubble.
@@ -129,6 +129,39 @@ Helpers:
 
 ---
 
+## Team Collaboration (vault is per-developer)
+
+The vault content (`<project>/.aicartographer/vault/*.md`) — LLM-written narratives + structured frontmatter for each blueprint — is **one local copy per developer**. It is not committed to git, for two reasons:
+
+- LLM output drifts between runs → committing it produces huge diffs and frequent merge conflicts
+- The vault depends on each developer's LLM key, model choice, and scan timing → no two developers will produce identical `.md` files
+
+### New Team Member Flow
+
+1. Pull the code (your UE project, no vault attached)
+2. Launch the plugin, configure your LLM key and model (Settings panel)
+3. Click **Run framework scan** (seconds, no LLM, writes the skeleton)
+4. Top bar → **Run project scan** (first full scan takes ~15-30 min depending on project size and model)
+5. Develop normally; the AssetRegistry stale listener (roadmap Phase A1) will auto-mark notes that need rescanning
+
+### What's Shared vs. Local
+
+| Shared (in git) | Local (per-developer) |
+|---|---|
+| UE project code + AICartographer plugin | `.aicartographer/vault/Blueprints/*.md` |
+| Backend config (excluding `backend/.env.local`) | `.aicartographer/vault/Systems/*.md` |
+| Vocabulary (`_meta/tag-vocabulary.json`, optionally shared) | Your local LLM key |
+
+**Your UE project's `.gitignore` must include**:
+
+```gitignore
+.aicartographer/
+```
+
+(If you forked the AICartographer repo itself, this rule is already in our `.gitignore`.)
+
+---
+
 ## Quick Start
 
 Two paths:
@@ -187,7 +220,7 @@ Two paths:
    - Top bar → **Run project scan** (uses LLM tokens, 30s-few minutes)
    - Hop into **Lv0** overview → click a system for **Lv1** → click a blueprint for **Lv2** → click a function for **Lv3**
 
-The vault lands in `<your project>/.aicartographer/vault/` and travels with the project under git. Detailed troubleshooting in [INSTALL.md](INSTALL.md) and `README-FIRST.txt` inside the zip.
+The vault lands in `<your project>/.aicartographer/vault/` — **local to your machine**, not committed to git ([Team Collaboration section](#team-collaboration-vault-is-per-developer) explains why). Detailed troubleshooting in [INSTALL.md](INSTALL.md) and `README-FIRST.txt` inside the zip.
 
 ### What's inside the zip
 

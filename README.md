@@ -25,7 +25,7 @@
 AICartographer 是一个嵌入 UE5 编辑器的 React 插件 + Python 后端，用 LLM 给整个项目的蓝图建一份"叙事地图"：
 
 - **不是又一个蓝图浏览器** — 它写故事：每个 BP 的 markdown 页面会讲"`OnDamageReceived` 在 `CurrentHP <= 0` 时被 broadcast，被 `GameMode.HandleDeath` 消费"，而不是干巴巴列变量名。
-- **不是又一个 AI 工具** — 它产出真正属于你项目的资产：所有 LLM 分析、笔记、tag 都落在 `<project>/.aicartographer/vault/` 下的 .md 文件里，git 跟随项目走。
+- **不是又一个 AI 工具** — 它产出真正属于你项目的资产：所有 LLM 分析、笔记、tag 都落在 `<project>/.aicartographer/vault/` 下的 .md 文件里，**每位开发者本地一份**，不进 git（[原因和入职流程见下方](#团队协作vault-不进-git)）。
 - **不是云端工具** — UE 编辑器和后端都跑在你本地，LLM key 由你输入并只活在 localStorage 里。
 
 > 适合谁：处理过中大型 UE5 项目、想快速上手别人代码 / 自己旧项目的开发者。第一次拉到一个 50+ 蓝图的工程时，这玩意能让你少看 80% 的废墟。
@@ -129,6 +129,39 @@ graph TB
 
 ---
 
+## 团队协作（vault 不进 git）
+
+vault 内容（`<project>/.aicartographer/vault/*.md`）是 LLM 给每个蓝图写的叙事笔记 + 结构化 frontmatter，**每位开发者本地一份**。它不进 git，原因有两个：
+
+- LLM 输出每次有差异 → 进 git 会让每次扫描产生巨大 diff、merge 冲突频繁
+- vault 取决于本地的 LLM key、模型选择、扫描时机 → 不同开发者扫出来的 .md 不会一致
+
+### 新人入职流程
+
+1. 拉代码（你的 UE 项目，不带 vault）
+2. 启动 plugin，配置 LLM key 和模型（设置面板）
+3. 点 **Run framework scan**（秒级，不调 LLM，写出骨架）
+4. 顶栏 **Run project scan**（首次全量大约 15-30 分钟，取决于项目大小和模型）
+5. 之后正常开发，AssetRegistry stale 监听会自动 mark 需要重扫的笔记（路线图阶段 A1）
+
+### 共享什么 / 不共享什么
+
+| 共享（进 git） | 不共享（本地） |
+|---|---|
+| UE 项目代码 + AICartographer plugin | `.aicartographer/vault/Blueprints/*.md` |
+| 后端配置（`backend/.env.local` 除外） | `.aicartographer/vault/Systems/*.md` |
+| 词表（`_meta/tag-vocabulary.json`，可选共享） | 你本地的 LLM key |
+
+**你的 UE 项目 .gitignore 必须包含**：
+
+```gitignore
+.aicartographer/
+```
+
+（如果你 fork 的是 AICartographer 仓库本身，本仓库的 .gitignore 已经包含此规则。）
+
+---
+
 ## 快速开始
 
 两条路径：
@@ -187,7 +220,7 @@ graph TB
    - 顶栏 → **Run project scan**（吃 LLM 配额，30 秒~几分钟）
    - 完成后进 **Lv0** 总览 → 点系统进 **Lv1** → 点蓝图进 **Lv2** → 点函数进 **Lv3**
 
-扫完后 vault 落在 `<你项目>/.aicartographer/vault/` 下，git 跟随项目走。详细排错见 [INSTALL.md](INSTALL.md) 和便携包内的 `README-FIRST.txt`。
+扫完后 vault 落在 `<你项目>/.aicartographer/vault/` 下，本地拥有，**不进 git**（[团队协作章节](#团队协作vault-不进-git) 解释了原因）。详细排错见 [INSTALL.md](INSTALL.md) 和便携包内的 `README-FIRST.txt`。
 
 ### 便携包目录结构
 
