@@ -98,3 +98,119 @@ export async function checkBackendHealth(): Promise<{ status: string; redis_avai
     return null;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Vault export — bundle every node into one JSON document so users can
+// hand the project graph to any external LLM (ChatGPT web / Claude.ai)
+// without paying for API tokens.  Works in both bridge and HTTP modes:
+// when bridge is available we walk listVault + readVaultFile locally,
+// otherwise we hit the backend's /api/v1/vault/export endpoint.
+// ─────────────────────────────────────────────────────────────────────────
+
+export type VaultExportScope = 'all' | 'l1' | 'l2';
+
+export interface VaultExportEntry {
+  relative_path: string;
+  frontmatter: VaultFrontmatter;
+  body: string;
+  size: number;
+}
+
+export interface VaultExport {
+  project_root: string;
+  scope: VaultExportScope;
+  generated_at: string;
+  manifest?: unknown;
+  systems: VaultExportEntry[];
+  blueprints: VaultExportEntry[];
+  counts: { systems: number; blueprints: number };
+}
+
+export async function exportVault(
+  projectRoot: string,
+  scope: VaultExportScope = 'all',
+  onProgress?: (done: number, total: number) => void,
+): Promise<VaultExport> {
+  // Bridge mode: aggregate locally to avoid requiring the Python backend.
+  // HTTP mode: prefer the backend endpoint (single round-trip, faster on
+  // large vaults) but fall back to local aggregation if the endpoint is
+  // missing (older backend version) or unreachable.
+  if (isBridgeAvailable()) {
+    return await aggregateExportLocally(projectRoot, scope, onProgress);
+  }
+  try {
+    const url = `${API_BASE}/api/v1/vault/export?project_root=${encodeURIComponent(projectRoot)}&scope=${scope}`;
+    const r = await fetch(url);
+    if (r.ok) return (await r.json()) as VaultExport;
+    // Backend is up but endpoint missing/erroring — fall through to local.
+  } catch {
+    /* fall through */
+  }
+  return await aggregateExportLocally(projectRoot, scope, onProgress);
+}
+
+async function aggregateExportLocally(
+  projectRoot: string,
+  scope: VaultExportScope,
+  onProgress?: (done: number, total: number) => void,
+): Promise<VaultExport> {
+  const list = await listVault(projectRoot);
+  const candidates = list.files.filter((f) => {
+    const top = f.relative_path.split('/')[0] ?? '';
+    if (top === '_meta' || top === '_systems') return false;
+    if (scope === 'l1') return top === 'Systems';
+    if (scope === 'l2') return top !== 'Systems';
+    return true;
+  });
+
+  const systems: VaultExportEntry[] = [];
+  const blueprints: VaultExportEntry[] = [];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const f = candidates[i];
+    onProgress?.(i, candidates.length);
+    try {
+      const file = await readVaultFile(projectRoot, f.relative_path);
+      const entry: VaultExportEntry = {
+        relative_path: f.relative_path,
+        frontmatter: file.frontmatter,
+        body: file.body,
+        size: f.size,
+      };
+      const top = f.relative_path.split('/')[0] ?? '';
+      if (top === 'Systems') systems.push(entry);
+      else blueprints.push(entry);
+    } catch (e) {
+      // Skip individual file failures — partial exports are still useful.
+      // eslint-disable-next-line no-console
+      console.warn('[exportVault] skip', f.relative_path, e);
+    }
+  }
+  onProgress?.(candidates.length, candidates.length);
+
+  return {
+    project_root: projectRoot,
+    scope,
+    generated_at: new Date().toISOString(),
+    manifest: list.manifest,
+    systems,
+    blueprints,
+    counts: { systems: systems.length, blueprints: blueprints.length },
+  };
+}
+
+// Browser download helper — wraps a Blob in an invisible <a download> click
+// so the user gets the OS save-as dialog (CEF inside UE supports this).
+export function downloadJSON(filename: string, payload: unknown): void {
+  const text = JSON.stringify(payload, null, 2);
+  const blob = new Blob([text], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  // Defer revoke so the download can start before we drop the blob.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}

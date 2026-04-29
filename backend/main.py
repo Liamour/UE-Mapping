@@ -11,6 +11,7 @@ import re
 import time
 import uuid
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Optional, Union, Any, Literal
 
@@ -1039,6 +1040,81 @@ async def vault_rebuild_backlinks(project_root: str, language: Optional[str] = N
         return {"project_root": project_root, **counts}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed: {e}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vault export — bundle the entire vault into a single JSON document
+# ─────────────────────────────────────────────────────────────────────────────
+# Lets users hand the project graph to any external LLM (ChatGPT web, Claude.ai)
+# without paying for API tokens.  scope=l1 keeps only Systems/*, scope=l2 keeps
+# only Blueprints/Components/Interfaces, scope=all (default) bundles both.
+# Each entry carries the raw frontmatter (already nested-schema, see §5) plus
+# the markdown body so an external reader doesn't need our normalize step.
+
+def _strip_frontmatter_text(raw: str) -> str:
+    """Return the markdown body sans `---\\n...\\n---\\n` header (if present)."""
+    if not raw.startswith("---\n"):
+        return raw
+    end = raw.find("\n---\n", 4)
+    if end == -1:
+        return raw
+    return raw[end + 5:]
+
+
+@app.get("/api/v1/vault/export")
+async def vault_export(project_root: str, scope: str = "all"):
+    if scope not in {"all", "l1", "l2"}:
+        raise HTTPException(status_code=400, detail="scope must be one of: all | l1 | l2")
+    root = vault_writer.vault_root(project_root)
+    if not root.exists():
+        raise HTTPException(status_code=404, detail=f"Vault not found at {root}")
+
+    systems: List[Dict[str, Any]] = []
+    blueprints: List[Dict[str, Any]] = []
+
+    for p in sorted(root.rglob("*.md")):
+        rel = str(p.relative_to(root)).replace("\\", "/")
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"[VAULT] export: skip {rel} ({e})")
+            continue
+        fm = vault_writer.read_existing_frontmatter(p) or {}
+        body = _strip_frontmatter_text(text)
+
+        entry = {
+            "relative_path": rel,
+            "frontmatter": fm,
+            "body": body,
+            "size": p.stat().st_size,
+        }
+
+        # Bucket by subdir.  Systems/* → L1; everything else → L2.  _meta and
+        # _systems (legacy) are dropped from the export — they're redundant
+        # given the per-file frontmatter.
+        top = rel.split("/", 1)[0] if "/" in rel else ""
+        if top in {"_meta", "_systems"}:
+            continue
+        if top == "Systems":
+            if scope in {"all", "l1"}:
+                systems.append(entry)
+        else:
+            if scope in {"all", "l2"}:
+                blueprints.append(entry)
+
+    manifest = vault_writer.load_manifest(project_root)
+    return {
+        "project_root": project_root,
+        "scope": scope,
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "manifest": manifest,
+        "systems": systems,
+        "blueprints": blueprints,
+        "counts": {
+            "systems": len(systems),
+            "blueprints": len(blueprints),
+        },
+    }
 
 
 if __name__ == "__main__":

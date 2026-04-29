@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useUIStore } from '../../store/useUIStore';
 import { useVaultStore } from '../../store/useVaultStore';
-import { rebuildBacklinks, checkBackendHealth } from '../../services/vaultApi';
+import { rebuildBacklinks, checkBackendHealth, exportVault, downloadJSON, type VaultExportScope } from '../../services/vaultApi';
 import { getBridgeStatus, getCandidateGlobals, isBridgeAvailable, isDeepScanAvailable, isVaultFileWriteAvailable } from '../../services/bridgeApi';
 import { rebuildSystemMOCs } from '../../services/mocGenerator';
 import { ScanOrchestrator } from './ScanOrchestrator';
@@ -78,6 +78,33 @@ export const SettingsModal: React.FC = () => {
       }));
     }
     setBusy(false);
+  };
+
+  const onExport = async (scope: VaultExportScope) => {
+    if (!projectRoot) return;
+    setBusy(true);
+    setStatus(t({ en: 'Exporting...', zh: '正在导出…' }));
+    try {
+      const data = await exportVault(projectRoot, scope, (done, total) => {
+        setStatus(t({
+          en: `Exporting ${done}/${total}...`,
+          zh: `正在导出 ${done}/${total}…`,
+        }));
+      });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const projName = projectRoot.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || 'project';
+      const filename = `aicartographer-${projName}-${scope}-${stamp}.json`;
+      downloadJSON(filename, data);
+      setStatus(t({
+        en: `Exported ${data.counts.systems} system(s) + ${data.counts.blueprints} blueprint(s) → ${filename}`,
+        zh: `已导出 ${data.counts.systems} 个系统 + ${data.counts.blueprints} 个蓝图 → ${filename}`,
+      }));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStatus(t({ en: `Export failed: ${msg}`, zh: `导出失败：${msg}` }));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const onRebuildMOCs = async () => {
@@ -169,6 +196,28 @@ export const SettingsModal: React.FC = () => {
             )}
             {status && <div className="settings-status">{status}</div>}
           </section>
+          {projectRoot && (
+            <section className="settings-section">
+              <h3>{t({ en: 'Export vault as JSON', zh: '导出 vault 为 JSON' })}</h3>
+              <p className="muted" dangerouslySetInnerHTML={{
+                __html: t({
+                  en: 'Bundle every node\'s frontmatter + body into a single JSON file. Hand it to any external LLM (ChatGPT web, Claude.ai, local model) to ask questions about the project without spending API tokens. <strong>L1</strong> = system overviews only; <strong>L2</strong> = per-blueprint details only; <strong>All</strong> = both.',
+                  zh: '把每个节点的 frontmatter + 正文打包成一个 JSON 文件。可以把它丢给任何外部 LLM（ChatGPT 网页版、Claude.ai、本地模型）提问，不消耗 API token。<strong>L1</strong> = 仅系统总览；<strong>L2</strong> = 仅蓝图详情；<strong>全部</strong> = 两者都包含。',
+                }),
+              }} />
+              <div className="settings-actions">
+                <button className="btn-text" onClick={() => onExport('all')} disabled={busy}>
+                  {t({ en: 'Export all', zh: '导出全部' })}
+                </button>
+                <button className="btn-text" onClick={() => onExport('l1')} disabled={busy}>
+                  {t({ en: 'Export L1 only', zh: '仅 L1' })}
+                </button>
+                <button className="btn-text" onClick={() => onExport('l2')} disabled={busy}>
+                  {t({ en: 'Export L2 only', zh: '仅 L2' })}
+                </button>
+              </div>
+            </section>
+          )}
           {scanAvailable && (
             <section className="settings-section">
               <h3>{t({ en: 'Framework scan', zh: '框架扫描' })} <span className="muted" style={{ fontWeight: 400, fontSize: 'var(--fs-xs)' }}>{t({ en: '(no LLM)', zh: '（不调用 LLM）' })}</span></h3>
