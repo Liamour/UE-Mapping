@@ -1350,6 +1350,8 @@ void UAICartographerBridge::HandleAssetRenamed(const FAssetData& AssetData, cons
     {
         StaleEventBuffer.RemoveAt(0);
     }
+    UE_LOG(LogTemp, Log, TEXT("[BRIDGE/Stale] renamed #%lld %s ← %s"),
+        StaleEventCounter, *Ev.Path, *OldObjectPath);
 }
 
 void UAICartographerBridge::HandleAssetRemoved(const FAssetData& AssetData)
@@ -1366,6 +1368,8 @@ void UAICartographerBridge::HandleAssetRemoved(const FAssetData& AssetData)
     {
         StaleEventBuffer.RemoveAt(0);
     }
+    UE_LOG(LogTemp, Log, TEXT("[BRIDGE/Stale] removed #%lld %s"),
+        StaleEventCounter, *Ev.Path);
 }
 
 void UAICartographerBridge::HandleAssetAdded(const FAssetData& AssetData)
@@ -1386,6 +1390,8 @@ void UAICartographerBridge::HandleAssetAdded(const FAssetData& AssetData)
     {
         StaleEventBuffer.RemoveAt(0);
     }
+    UE_LOG(LogTemp, Log, TEXT("[BRIDGE/Stale] added   #%lld %s"),
+        StaleEventCounter, *Ev.Path);
 }
 
 void UAICartographerBridge::HandleAssetUpdatedOnDisk(const FAssetData& AssetData)
@@ -1394,6 +1400,12 @@ void UAICartographerBridge::HandleAssetUpdatedOnDisk(const FAssetData& AssetData
     // don't gate on bInitialAssetsLoaded here: OnAssetUpdatedOnDisk fires
     // ONLY for actual save events, not initial-scan registration, so it's
     // safe from the moment the listener is registered.
+    //
+    // IMPORTANT: this delegate fires only when the user saves the asset
+    // (Ctrl+S in the BP editor or File > Save All).  Edits made inside a
+    // function graph that haven't been saved yet won't trigger an event.
+    // The log line below makes it easy for end users to verify in
+    // Output Log whether their save reached our listener.
     if (!IsBlueprintLikeAsset(AssetData) || !IsGameContentPath(AssetData)) return;
     StaleEventCounter++;
     FStaleEvent Ev;
@@ -1406,6 +1418,8 @@ void UAICartographerBridge::HandleAssetUpdatedOnDisk(const FAssetData& AssetData
     {
         StaleEventBuffer.RemoveAt(0);
     }
+    UE_LOG(LogTemp, Log, TEXT("[BRIDGE/Stale] updated #%lld %s"),
+        StaleEventCounter, *Ev.Path);
 }
 
 void UAICartographerBridge::HandleFilesLoaded()

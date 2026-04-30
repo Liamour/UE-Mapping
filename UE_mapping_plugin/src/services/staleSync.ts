@@ -30,6 +30,20 @@ async function pollOnce(): Promise<void> {
   try {
     const since = useStaleStore.getState().latestCounter;
     const result = await bridgeGetStaleEventsSince(since);
+    // Counter regression — bridge has a smaller latest_counter than we
+    // remember.  This means UE restarted (in-memory event buffer reset to
+    // 0) since our last poll.  Reset our cursor so we don't sit forever
+    // waiting for counters that will never arrive again.  Keep the
+    // persisted staleByPath so the user's pending list survives the
+    // restart.
+    if (result.latest_counter < since) {
+      useStaleStore.getState().resyncCounter(result.latest_counter);
+      // eslint-disable-next-line no-console
+      console.info(
+        '[staleSync] UE restart detected (counter regressed', since, '→', result.latest_counter,
+        ') — preserved', useStaleStore.getState().staleByPath.size, 'pending entries',
+      );
+    }
     const beforeCount = useStaleStore.getState().staleByPath.size;
     useStaleStore.getState().applyEvents(result.events, result.latest_counter);
     const afterCount = useStaleStore.getState().staleByPath.size;

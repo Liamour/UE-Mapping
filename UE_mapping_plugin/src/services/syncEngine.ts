@@ -68,10 +68,17 @@ export async function applyOne(
     return files.find((f) => f.title === targetName)?.relative_path;
   };
 
+  // Track every relative_path we touched so we can invalidate the vault
+  // file cache at the end — otherwise the Lv2 tab keeps rendering the
+  // pre-rescan snapshot (e.g. function the user just deleted still listed
+  // under exports_functions:).
+  const touchedRels: string[] = [];
+
   let outcome: SyncOutcome;
   try {
     if (entry.type === 'added' || entry.type === 'updated') {
       const { relativePath } = await syncSingleAsset(projectRoot, entry.path);
+      touchedRels.push(relativePath);
       stale.removePath(entry.path);
       outcome = {
         entry,
@@ -92,6 +99,27 @@ export async function applyOne(
       }
       const newName = assetName(entry.path);
       await applyVaultRename(projectRoot, oldRel, newName, entry.path);
+      touchedRels.push(oldRel);
+      // After the .md is in its new location with updated frontmatter,
+      // re-fingerprint the asset so its function/component/edge tables
+      // reflect the current Blueprint state.  Two reasons:
+      //   (a) a true rename usually leaves AST untouched but cheap to
+      //       refresh — keeps ast_hash and scan_at honest;
+      //   (b) HEURISTIC renames (where we paired add+remove because UE
+      //       didn't fire OnAssetRenamed) can have completely different
+      //       content under the same folder; we MUST rescan or the .md
+      //       carries the old asset's data under the new asset's name.
+      try {
+        const { relativePath: postRel } = await syncSingleAsset(projectRoot, entry.path);
+        touchedRels.push(postRel);
+      } catch (rescanErr) {
+        // Don't let a rescan failure invalidate the rename — the rename
+        // already succeeded.  Surface the warning in the outcome message
+        // so the user can retry the rescan manually if they care.
+        const msg = rescanErr instanceof Error ? rescanErr.message : String(rescanErr);
+        // eslint-disable-next-line no-console
+        console.warn('[syncEngine] post-rename rescan failed:', msg);
+      }
       stale.removeRename(entry.path, entry.previousPath);
       outcome = { entry, ok: true, action: 'renamed' };
     } else if (entry.type === 'removed') {
@@ -102,6 +130,7 @@ export async function applyOne(
         outcome = { entry, ok: true, action: 'dismissed' };
       } else {
         await deleteVaultFile(projectRoot, rel);
+        touchedRels.push(rel);
         stale.removePath(entry.path);
         outcome = { entry, ok: true, action: 'deleted' };
       }
@@ -111,6 +140,15 @@ export async function applyOne(
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { entry, ok: false, action: 'skipped', message: msg };
+  }
+
+  // Invalidate the per-file cache for every touched .md so the Lv2 tab
+  // re-fetches fresh content on next render.  Without this, the UI keeps
+  // showing pre-rescan frontmatter (deleted function still in
+  // exports_functions, stale ast_hash, etc).
+  if (touchedRels.length > 0) {
+    const invalidate = useVaultStore.getState().invalidateFile;
+    for (const rel of touchedRels) invalidate(rel);
   }
 
   // Optional LLM enrichment for added/updated.  Currently a stub — see

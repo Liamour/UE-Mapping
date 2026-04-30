@@ -29,6 +29,12 @@ import { useT } from '../../utils/i18n';
 type ActionStatus = 'idle' | 'busy' | 'ok' | 'error';
 interface ActionState { status: ActionStatus; message?: string; }
 
+// Public shape of the per-bucket counts produced by tallyStale().  Hoisted
+// here so the confirm modal (which accepts both real and synthetic single-
+// entry tallies) doesn't have to import the function purely for its return
+// type.
+type StaleTallyShape = ReturnType<typeof tallyStale>;
+
 export const TopBar: React.FC = () => {
   const t = useT();
   const setSearchOpen = useUIStore((s) => s.setSearchOpen);
@@ -50,7 +56,11 @@ export const TopBar: React.FC = () => {
   const [actions, setActions] = useState<Map<string, ActionState>>(new Map());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  // confirmTarget === 'all'  → bulk Apply-all flow
+  // confirmTarget === entry  → per-row Apply flow (only for added/updated,
+  //                            so the user gets a chance to opt-in to LLM)
+  // confirmTarget === null   → modal closed
+  const [confirmTarget, setConfirmTarget] = useState<'all' | StaleEntry | null>(null);
 
   const canGoBack = (activeTab?.history.length ?? 0) > 0;
 
@@ -102,10 +112,27 @@ export const TopBar: React.FC = () => {
   // ---- Per-row apply -------------------------------------------------------
   // Delegates to the shared sync engine so this UI doesn't duplicate logic.
   // Translates the SyncOutcome into per-row UI state.
-  const applyRow = async (entry: StaleEntry) => {
+  //
+  // For 'added' and 'updated' rows, the click first opens the LLM-prompt
+  // confirm modal (when confirmBeforeApplyAll is on) so the user can opt
+  // into deep analysis on this single asset.  'renamed' / 'removed' rows
+  // skip the modal — there's no LLM step there and the action is already
+  // explicit from the button label.
+  const onClickRow = (entry: StaleEntry) => {
+    const wantsLlmPrompt =
+      (entry.type === 'added' || entry.type === 'updated') && confirmBeforeApplyAll;
+    if (wantsLlmPrompt) {
+      setConfirmTarget(entry);
+    } else {
+      void runRowApply(entry, autoLlmAfterSync && (entry.type === 'added' || entry.type === 'updated'));
+    }
+  };
+
+  const runRowApply = async (entry: StaleEntry, withLlm: boolean) => {
+    setConfirmTarget(null);
     const key = entryKey(entry);
     setEntryAction(key, { status: 'busy' });
-    const outcome = await applyOne(entry, { withLlm: false });
+    const outcome = await applyOne(entry, { withLlm });
     if (outcome.ok) {
       setEntryAction(key, { status: 'ok' });
       try { await loadIndex(); } catch { /* non-fatal */ }
@@ -120,12 +147,12 @@ export const TopBar: React.FC = () => {
   // user can opt into LLM analysis on a per-run basis.
   const onClickApplyAll = () => {
     if (staleEntries.length === 0) return;
-    if (confirmBeforeApplyAll) setConfirmOpen(true);
+    if (confirmBeforeApplyAll) setConfirmTarget('all');
     else void runApplyAll(autoLlmAfterSync);
   };
 
   const runApplyAll = async (withLlm: boolean) => {
-    setConfirmOpen(false);
+    setConfirmTarget(null);
     setBulkBusy(true);
     setBulkError(null);
     const report = await applyAll({
@@ -145,6 +172,19 @@ export const TopBar: React.FC = () => {
     }
     setBulkBusy(false);
   };
+
+  // The confirm modal accepts either the bulk tally (target === 'all') or a
+  // single entry.  We compute the per-bucket counts to feed it accordingly.
+  const confirmTally = useMemo<StaleTallyShape | null>(() => {
+    if (confirmTarget === null) return null;
+    if (confirmTarget === 'all') return tally;
+    const single: StaleTallyShape = {
+      added: 0, updated: 0, renamed: 0, removed: 0, total: 1,
+      highestPriority: confirmTarget.type,
+    };
+    single[confirmTarget.type] = 1;
+    return single;
+  }, [confirmTarget, tally]);
 
   return (
     <div className="topbar">
@@ -222,7 +262,6 @@ export const TopBar: React.FC = () => {
                       borderBottom: '1px solid rgba(0,0,0,0.05)',
                     }}>{bulkError}</div>
                   )}
-                  <TypeLegend t={t} />
                   <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
                     {staleEntries.map((e) => {
                       const rel = findRelativeFor(e);
@@ -292,7 +331,7 @@ export const TopBar: React.FC = () => {
                               busy={action?.status === 'busy'}
                               done={action?.status === 'ok'}
                               t={t}
-                              onApply={() => { void applyRow(e); }}
+                              onApply={() => { onClickRow(e); }}
                             />
                           </div>
                         </li>
@@ -330,13 +369,18 @@ export const TopBar: React.FC = () => {
         <button className="iconbtn" title={t({ en: 'Toggle right pane', zh: '切换右侧面板' })} onClick={toggleRight}>▤</button>
       </div>
 
-      {confirmOpen && (
-        <ApplyAllConfirmModal
-          tally={tally}
+      {confirmTarget !== null && confirmTally !== null && (
+        <ApplyConfirmModal
+          mode={confirmTarget === 'all' ? 'all' : 'single'}
+          tally={confirmTally}
+          singleEntry={confirmTarget === 'all' ? null : confirmTarget}
           autoLlm={autoLlmAfterSync}
           setAutoLlm={setAutoLlmAfterSync}
-          onCancel={() => setConfirmOpen(false)}
-          onConfirm={(withLlm) => { void runApplyAll(withLlm); }}
+          onCancel={() => setConfirmTarget(null)}
+          onConfirm={(withLlm) => {
+            if (confirmTarget === 'all') void runApplyAll(withLlm);
+            else void runRowApply(confirmTarget, withLlm);
+          }}
           t={t}
         />
       )}
@@ -421,22 +465,6 @@ const DropdownHeader: React.FC<{
     </div>
   );
 };
-
-const TypeLegend: React.FC<{ t: ReturnType<typeof useT> }> = ({ t }) => (
-  <div style={{
-    padding: '8px 14px',
-    background: 'rgba(0,0,0,0.025)',
-    fontSize: 'var(--fs-xs)',
-    color: 'var(--color-text-muted, #666)',
-    borderBottom: '1px solid rgba(0,0,0,0.05)',
-    lineHeight: 1.6,
-  }}>
-    <PriorityChip type="added" t={t} /> P0 {t({ en: 'new asset — Apply mints skeleton .md', zh: '新资产 — 应用即生成骨架 .md' })} ·{' '}
-    <PriorityChip type="updated" t={t} /> P1 {t({ en: 're-saved — Apply re-fingerprints', zh: '已重新保存 — 应用即重新提取 AST' })} ·{' '}
-    <PriorityChip type="renamed" t={t} /> P2 {t({ en: 'X → Y rename', zh: '编辑器中改名' })} ·{' '}
-    <PriorityChip type="removed" t={t} /> P3 {t({ en: 'asset gone — Apply removes the .md', zh: '资产已删除 — 应用即同步删除 .md' })}
-  </div>
-);
 
 const PriorityChip: React.FC<{ type: StaleEventType; t: ReturnType<typeof useT> }> = ({ type, t }) => {
   const p = PRIORITY[type];
@@ -568,17 +596,23 @@ const ApplyButton: React.FC<{
   );
 };
 
-// ---- Apply-all confirm modal --------------------------------------------
-const ApplyAllConfirmModal: React.FC<{
-  tally: ReturnType<typeof tallyStale>;
+// ---- Apply confirm modal ------------------------------------------------
+// Used both for the bulk "Apply all" flow and for single-row added/updated
+// applies that want to surface the LLM opt-in.  `mode` controls the title
+// + body wording; `tally` always feeds the per-bucket Row list.
+const ApplyConfirmModal: React.FC<{
+  mode: 'all' | 'single';
+  tally: StaleTallyShape;
+  singleEntry: StaleEntry | null;
   autoLlm: boolean;
   setAutoLlm: (v: boolean) => void;
   onCancel: () => void;
   onConfirm: (withLlm: boolean) => void;
   t: ReturnType<typeof useT>;
-}> = ({ tally, autoLlm, setAutoLlm, onCancel, onConfirm, t }) => {
+}> = ({ mode, tally, singleEntry, autoLlm, setAutoLlm, onCancel, onConfirm, t }) => {
   const llmReady = isLlmAnalysisAvailable();
   const ops = tally.added + tally.updated + tally.renamed + tally.removed;
+  const singleName = singleEntry ? assetName(singleEntry.path) : '';
 
   const Row: React.FC<{ type: StaleEventType; count: number; verb: { en: string; zh: string } }> = ({ type, count, verb }) => {
     if (count === 0) return null;
@@ -612,13 +646,20 @@ const ApplyAllConfirmModal: React.FC<{
         }}
       >
         <div style={{ fontSize: 'var(--fs-md, 16px)', fontWeight: 700, marginBottom: 6 }}>
-          {t({ en: `Apply ${ops} change(s)?`, zh: `即将应用 ${ops} 项变更` })}
+          {mode === 'all'
+            ? t({ en: `Apply ${ops} change(s)?`, zh: `即将应用 ${ops} 项变更` })
+            : t({ en: `Apply this change?`, zh: `应用此项变更？` })}
         </div>
         <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--color-text-muted, #666)', marginBottom: 12 }}>
-          {t({
-            en: 'Changes will be applied in priority order. NOTES sections are preserved across renames and re-scans.',
-            zh: '将按优先级顺序应用。NOTES 段在重命名和重新扫描中均保留。',
-          })}
+          {mode === 'all'
+            ? t({
+                en: 'Changes will be applied in priority order. NOTES sections are preserved across renames and re-scans.',
+                zh: '将按优先级顺序应用。NOTES 段在重命名和重新扫描中均保留。',
+              })
+            : t({
+                en: `Re-scan ${singleName} and rewrite its skeleton .md. NOTES are preserved.`,
+                zh: `对 ${singleName} 重新扫描并重写骨架 .md。NOTES 段会保留。`,
+              })}
         </div>
         <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 16px 0' }}>
           <Row type="added" count={tally.added} verb={{ en: 'scan + create skeleton .md', zh: '扫描并创建骨架 .md' }} />
@@ -697,7 +738,9 @@ const ApplyAllConfirmModal: React.FC<{
               fontWeight: 700,
               cursor: 'pointer',
             }}
-          >{t({ en: 'Apply all', zh: '应用全部' })}</button>
+          >{mode === 'all'
+            ? t({ en: 'Apply all', zh: '应用全部' })
+            : t({ en: 'Apply', zh: '应用' })}</button>
         </div>
       </div>
     </div>
