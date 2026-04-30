@@ -126,6 +126,24 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
     }
   };
 
+  // ⚠ Hook ordering: every hook (useMemo / useState / useEffect) MUST run
+  // before any early return — otherwise the hook count changes between
+  // renders when `file` transitions from undefined to loaded, and React
+  // throws "Rendered fewer/more hooks than expected" (minified #300 / #310).
+  // `staleEntry` previously sat below the `if (!file) return` guard which
+  // worked only when the file was always cache-warm; navigating in cold
+  // (e.g. Lv4 ↔ Lv2 tab swap) tripped the rule.
+  const assetPathForStale = (file?.frontmatter.asset_path as string | undefined) ?? '';
+  const staleEntry = useMemo(() => {
+    if (!assetPathForStale) return undefined;
+    const direct = staleByPath.get(assetPathForStale);
+    if (direct) return direct;
+    for (const e of staleByPath.values()) {
+      if (e.type === 'renamed' && e.previousPath === assetPathForStale) return e;
+    }
+    return undefined;
+  }, [staleByPath, assetPathForStale]);
+
   if (!file) {
     return <div className="empty-state"><p>{t({ en: 'Loading note…', zh: '正在加载笔记…' })}</p></div>;
   }
@@ -137,19 +155,6 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
   const dispatchers = (fm.exports_dispatchers ?? []) as string[];
   const variables = (fm.variables ?? []) as Array<Record<string, unknown>>;
   const analysisState = (fm.analysis_state as string | undefined) ?? 'skeleton';
-  const assetPathForStale = (fm.asset_path as string) ?? '';
-  // Reverse lookup: the vault note still lives under its old asset_path
-  // until the user applies the rename, so we ALSO match against
-  // previousPath of every renamed entry.
-  const staleEntry = useMemo(() => {
-    if (!assetPathForStale) return undefined;
-    const direct = staleByPath.get(assetPathForStale);
-    if (direct) return direct;
-    for (const e of staleByPath.values()) {
-      if (e.type === 'renamed' && e.previousPath === assetPathForStale) return e;
-    }
-    return undefined;
-  }, [staleByPath, assetPathForStale]);
   const isCurrentStale = !!staleEntry;
 
   return (
