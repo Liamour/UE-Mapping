@@ -1661,3 +1661,97 @@ b8c2b07 feat(scan): A2+B — wire Reflection summary into LLM scan, rewrite narr
 
 至此 Phase A 落地完毕：A1（stale sync）→ A2（reflection 持久化 + LLM 接管）→ A3（Lv4 CallTrace）→ B（叙事 prompt）。后续按 §22.5 决定下一阶段。
 
+---
+
+## 23. Session 2026-05-01 — Phase B #1: Reflection 扩 ClassPath（DataTable + UDataAsset）
+
+> 接 §22.5 候选 #4「Reflection 扩 ClassPath」。Phase A 的 reflection 路径只覆盖 BP fast-path（UBlueprint + WBP/AnimBP/Library），数据资产（DataTable + 原生 UDataAsset 子类）全被过滤掉 —— Cropout 项目的 3 个 DT_* + 7 个 IA_* + 4 个 IMC_* 全在 vault 之外，BP frontmatter 里的 `hard_refs` 指向它们时 Lv4 CallTrace 显示为「missing」占位。这一段把 C++ filter 扩到这两类，端到端打通到 LLM 叙事。
+
+### 23.1 范围（in / out）
+
+**In**：
+- `UDataTable`（含 `UCompositeDataTable`）
+- `UDataAsset` 及子类（递归）—— 自动覆盖 `UPrimaryDataAsset`、`UInputAction`、`UInputMappingContext` 等
+
+**Out（明确不做）**：
+- **Niagara**（`UNiagaraSystem` / `UNiagaraEmitter`）—— 需要在 `Build.cs` 加 `Niagara` 模块依赖；Cropout 启用了 Niagara 但其它项目可能没有，强加依赖会导致他们编译失败。单独一刀做，`#ifdef WITH_NIAGARA` 守卫
+- **Material / MaterialInstance** —— LLM 叙事在材质上价值低（图像、节点参数），且数量多，token 浪费
+- **USoundClass / USoundAttenuation** —— 不是 `UDataAsset` 子类，自动被过滤排除（声学属性也不适合 LLM 叙事）
+
+### 23.2 落地清单（commit 待打）
+
+#### C++ Bridge（`AICartographerBridge.cpp`）
+
+- 新 include：`Engine/DataAsset.h`、`Engine/DataTable.h`
+- 新 helper `ClassifyNonBlueprintAsset(UObject*)` —— 按 UClass 层级返回 `"DataTable"` / `"DataAsset"` / `"Asset"`（catch-all 错误码）
+- `RequestDeepScan` 分叉：BP fast-path 不变；非 BP 路径用 `LoadObject<UObject>` + `ClassifyNonBlueprintAsset`，返回 `functions/components/edges` 全空数组 + 包含 row struct 的 `parent_class`（DataTable 时变 `DataTable<RowStructName>`）
+- `GetReflectionAssetSummary` 分叉：BP 路径不变；非 BP 路径走 FProperty walk，DataTable 特殊化为合成 property `Rows: TMap<FName, F<RowStruct>> [RowCount=N]`（真 FProperty walk 在 UDataTable 上只会捞到内部 RowMap 指针，对叙事没用）
+- `BuildEdgesBlock` lambda 提取 —— hard/soft refs + interfaces 两个路径共用，避免代码 dup
+- `ListBlueprintAssets` 扩 `Filter.ClassPaths`：加 `/Script/Engine/DataAsset` + `/Script/Engine/DataTable`
+- `kAcceptedClassNames` 扩 `DataTable` + `CompositeDataTable`；新 `IsDataAssetClassName` lambda 兜底（trust the recursive registry filter，名字含 "Data" 或以 "Asset" 结尾就放行）
+- `ast_hash` 非 BP 路径降级方案：`CRC32(asset_path | class_path | prop_count)` —— 比 K2 fingerprint 粗，但够 manifest dedup 用（DataTable 内容变 → prop_count 变 → hash 变）
+
+#### Backend（`vault_writer.py` + `main.py`）
+
+- `NODE_TYPE_TO_SUBDIR` 加 `"DataAsset" → "Data"`、`"DataTable" → "Data"`（同一个子目录，按类型分目录在 vault 这个量级是 over-engineering）
+- `SYSTEM_PROMPT` 加 「DATA-ONLY ASSETS」段：明确告诉 LLM 当 STRUCTURE 全 (none) 时怎么写（EXECUTION FLOW 写一句「Data-only asset — no execution flow」就够，不许编造）
+- **顺手 §23 hardening**：path-derived system fallback 加 vocab gate —— 之前 `/Game/Blueprint/Villagers/BTT_StuckRecover` 兜成 `system/blueprint`（不在 vocab 里），现在变 `system/gameplay-core`（vocab catch-all）。`[SYS_FALLBACK]` 日志加 `vocab_hit` 字段方便统计 prompt 守约率
+
+#### Frontend（`UE_mapping_plugin/src/`）
+
+- `bridgeApi.ts::BridgeAssetSummary` 加可选 `node_type?: string`（pre-Phase-B 后端不发，可选）
+- `frameworkScan.ts::subdirForType` 加 `DataAsset / DataTable → "Data"`
+- `utils/vaultIndex.ts::subdirToType` 补全：`Widgets/Anims/Libraries/Data` 子目录都正确反查 node_type
+- vite single-file build → `Plugins/AICartographer/Resources/WebUI/index.html` 559.40 KB（before 559.21 KB，Δ ~190 字节）
+
+### 23.3 用户必须做的事
+
+- ⚠️ **重 build C++ 插件** —— `RequestDeepScan` / `GetReflectionAssetSummary` / `ListBlueprintAssets` 三个 UFUNCTION 都改了。Live Coding 应该够（没动 reflection 宏），不行就 close editor + 删 `Plugins/AICartographer/Binaries/`、`Intermediate/` + 重启 + 让 UE 自动重 build
+- **重启 uvicorn** —— `vault_writer.NODE_TYPE_TO_SUBDIR` + `SYSTEM_PROMPT` + `analyze_one_node` 三处改动
+- **重新跑 framework scan** —— 必须重跑 `Settings → Scan project structure`，新的 14 个文件（3 DT + 7 IA + 4 IMC）才会进 vault
+- **再跑 LLM analysis** —— 14 个新文件需要 LLM 写叙事；预计多 14 次 LLM call
+- 跑完后预期看到：
+  - `vault/Data/DT_Jobs.md`、`vault/Data/DT_Buidables.md`、`vault/Data/IA_Move.md` 等 ~14 个新 .md
+  - 这些文件 frontmatter `type:` 字段正确显示 `DataTable` 或 `DataAsset`
+  - `Lv4 CallTrace` 在 BP_Villag → DT_Jobs 这条边上的 target 节点不再是「missing」灰色占位
+  - DT_* 文件叙事 EXECUTION FLOW 应明确写「Data-only asset — no execution flow」而不是编造
+
+### 23.4 已知限制 / Tech debt
+
+- **Niagara 还没进** —— 单独一刀做，`Build.cs` 加 `Niagara` 模块 + `#if WITH_NIAGARA` 守卫
+- **DataTable 行级别内容没看** —— 现在只报 row struct + count，没把每行的具体值给 LLM。理论上对小表（< 50 行）可以全 dump；大表（DT_Buidables 这种）会撑爆 context。Phase C 决定要不要做 row sampling
+- **Input Action / IMC 的 binding 关系没追** —— 一个 IMC 绑了哪些 IA、IA 又被哪些 BP 监听 —— 这是 EnhancedInput 的核心架构信息，但需要走 `UInputMappingContext::GetMappings()` API 解析。Phase B #2 的事
+- **AssetRegistry 递归 filter 拉进的子类不可控** —— 项目可能塞进意外的 UDataAsset 子类（自定义 SkillData、CharacterData 之类）。我们 trust the registry 全收，用户不想分析就在 Settings 加排除模式（还没做 UI）
+- **Material 等大类完全没扩** —— Material / Texture / Mesh 在 LLM 叙事价值低，正确的工程决策是不扩。但用户需要查 BP→Material 引用时 Lv4 还是会显示 `missing`
+
+### 23.5 测试验证清单
+
+跑完用户必做事项后逐项验证：
+
+- [ ] uvicorn 控制台看 `[BRIDGE] ReflectionSummary (non-BP)` 日志 —— DT_/IA_/IMC_ 都应出现
+- [ ] `[ARCHITECT] DeepScan: ... (data-only, no K2 graph)` 日志 —— 同上 14 条
+- [ ] `vault/Data/` 下生成 ~14 个 .md
+- [ ] 抽查 DT_Jobs.md：frontmatter `type: DataTable`、`parent_class: DataTable<Job>`（或类似）、`properties` 块只有合成的 `Rows` 一项、`exports/components/function_flags` 都是空
+- [ ] 抽查 IA_Move.md：`type: DataAsset` (或 InputAction，取决于 UClass)、`properties` 是真 FProperty walk 出的 ValueType / Trigger / Modifier 字段
+- [ ] LLM 叙事：DT_Jobs 的 EXECUTION FLOW 应该写「Data-only asset — no execution flow」类似句，**不能**编造 `BeginPlay`
+- [ ] cardwall 总数从 76 升到 ~90（+14）
+- [ ] 任意 BP 的 Lv4 CallTrace：`hard_refs` 边指向 DT_Jobs 应该显示为正常节点（不是 missing 灰色）
+- [ ] `[SYS_FALLBACK]` 日志里 `vocab_hit=False` 的条目数应大幅下降（之前 BTT_/IM_ 等都会 mismatch；现在都会兜回 `gameplay-core`）
+
+### 23.6 commit 待打（this session 当前）
+
+```
+TBD feat(scan/Phase-B-1): extend Reflection to DataTable + UDataAsset subclasses
+```
+
+单 commit 包：C++ bridge + 后端 NODE_TYPE_TO_SUBDIR + SYSTEM_PROMPT 数据资产段 + path-fallback vocab 守卫 + 前端 subdirForType + WebUI 重 build。
+
+### 23.7 下一阶段建议
+
+按 §22.5 剩余优先级：
+
+1. **Phase B #2: Lv4 inbound 反向调用链**（「谁调我」）—— 现在 outbound 已经接通 DT/DA，反向看 hub 资产被谁引用是顺势；后端反向边索引（一次性 walk + cache）
+2. **Phase B #3: Niagara**（独立 commit，需 `Build.cs` 改）
+3. **Phase B #4: Anti-fab guard**（§22.5 #1）—— 跑过 23.5 验证后如果叙事仍出现 inventory 外的名字，就上自动检测
+4. **Phase C: RAG 问答**（§18.6 阶段 C1）—— 真正解锁日常使用场景。bge-m3 + structure-aware chunks + reranker + tool-calling，前 3 块是 RAG 工程，第 4 块是产品架构（详见上一段聊天记录）
+

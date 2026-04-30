@@ -103,6 +103,13 @@ NODE_TYPE_TO_SUBDIR = {
     "AnimBlueprint": "Anims",
     "FunctionLibrary": "Libraries",
     "MacroLibrary": "Libraries",
+    # Phase B (§22.5 #4) — non-Blueprint introspectable types.  These have
+    # no UEdGraph (functions/components/edges arrays come back empty), so the
+    # narrative LLM has only frontmatter properties + AssetRegistry refs to
+    # work with.  Folded into one Data/ subdir for now — the count is small
+    # and splitting DataTable/DataAsset adds folder churn for marginal value.
+    "DataAsset": "Data",
+    "DataTable": "Data",
 }
 
 

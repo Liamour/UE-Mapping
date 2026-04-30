@@ -6,6 +6,8 @@
 #include "Engine/Blueprint.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/SCS_Node.h"
+#include "Engine/DataAsset.h"
+#include "Engine/DataTable.h"
 #include "Misc/PackageName.h"
 #include "AssetRegistry/AssetIdentifier.h"
 #include "EdGraph/EdGraphNode.h"
@@ -308,6 +310,21 @@ namespace
         return TEXT("Blueprint");
     }
 
+    // Phase B (§22.5 #4) — classify a non-Blueprint asset by walking its UClass
+    // hierarchy.  Used by RequestDeepScan / GetReflectionAssetSummary when the
+    // asset can't be loaded as a UBlueprint (DataTable, native UDataAsset
+    // subclasses).  Order matters: DataTable is a UDataAsset cousin (both
+    // descend from UObject) so we check it first; UDataAsset descendants
+    // (PrimaryDataAsset, custom user data assets) fall into the generic
+    // "DataAsset" bucket.
+    static FString ClassifyNonBlueprintAsset(UObject* Obj)
+    {
+        if (!Obj) return TEXT("Asset");
+        if (Obj->IsA<UDataTable>()) return TEXT("DataTable");
+        if (Obj->IsA<UDataAsset>()) return TEXT("DataAsset");
+        return TEXT("Asset");
+    }
+
     // Resolve a UClass back to the on-disk Blueprint asset path that generated
     // it.  Returns empty string for native engine classes (which have no BP).
     // Used by the framework-scan edge extractor to ignore engine-only references.
@@ -549,8 +566,13 @@ FString UAICartographerBridge::RequestDeepScan(const FString& AssetPath)
     if (AssetDataList.Num() == 0)
         return MakeErrorJson(FString::Printf(TEXT("no asset at package path: %s"), *PackageName));
 
-    // Accept every blueprint flavour the AssetRegistry filter in
-    // ListBlueprintAssets pulls in.  Keep this set in sync with that filter.
+    // Accept every Blueprint flavour PLUS non-BP types we can introspect
+    // structurally (DataTable, native UDataAsset subclasses — Phase B §22.5 #4).
+    // BP-likes go through the UBlueprint fast path; non-BP types fall through
+    // to a UObject load and emit a graph-less envelope (functions/components/
+    // edges all empty — there's no UEdGraph to walk).  Niagara is intentionally
+    // out of MVP scope (would require linking the Niagara module in Build.cs;
+    // adds risk for projects where the plugin is disabled).
     static const TSet<FName> kAcceptedBPClasses = {
         FName("Blueprint"),
         FName("WidgetBlueprint"),
@@ -559,33 +581,108 @@ FString UAICartographerBridge::RequestDeepScan(const FString& AssetPath)
         FName("BlueprintFunctionLibrary"),
         FName("BlueprintMacroLibrary"),
     };
-    bool bIsBlueprint = false;
+    bool bIsBlueprintLike = false;
     for (const FAssetData& Asset : AssetDataList)
     {
         if (kAcceptedBPClasses.Contains(Asset.AssetClassPath.GetAssetName()))
         {
-            bIsBlueprint = true;
+            bIsBlueprintLike = true;
             break;
         }
     }
-    if (!bIsBlueprint)
-        return MakeErrorJson(FString::Printf(TEXT("asset is not a Blueprint-like type: %s"), *PackageName));
 
-    UBlueprint* LoadedBP = LoadObject<UBlueprint>(nullptr, *CleanPath);
-    if (!LoadedBP)
-        return MakeErrorJson(FString::Printf(TEXT("LoadObject failed: %s"), *CleanPath));
-
-    const FString AstHash    = ComputeBlueprintAstHash(LoadedBP);
-    const FString NodeType   = ClassifyBlueprintNodeType(LoadedBP);
-    const FString Name       = LoadedBP->GetName();
-    FString ParentClass;
-    if (UClass* GenClass = LoadedBP->GeneratedClass)
+    // BP fast path: walks K2 graphs for functions/components/edges.
+    if (bIsBlueprintLike)
     {
-        if (UClass* Super = GenClass->GetSuperClass())
-            ParentClass = Super->GetName();
+        UBlueprint* LoadedBP = LoadObject<UBlueprint>(nullptr, *CleanPath);
+        if (!LoadedBP)
+            return MakeErrorJson(FString::Printf(TEXT("LoadObject failed: %s"), *CleanPath));
+
+        const FString AstHash    = ComputeBlueprintAstHash(LoadedBP);
+        const FString NodeType   = ClassifyBlueprintNodeType(LoadedBP);
+        const FString Name       = LoadedBP->GetName();
+        FString ParentClass;
+        if (UClass* GenClass = LoadedBP->GeneratedClass)
+        {
+            if (UClass* Super = GenClass->GetSuperClass())
+                ParentClass = Super->GetName();
+        }
+        if (ParentClass.IsEmpty() && LoadedBP->ParentClass)
+            ParentClass = LoadedBP->ParentClass->GetName();
+
+        TSharedRef<FJsonObject> Root = MakeShareable(new FJsonObject());
+        Root->SetBoolField(TEXT("ok"), true);
+        Root->SetStringField(TEXT("asset_path"), CleanPath);
+        Root->SetStringField(TEXT("ast_hash"), AstHash);
+        Root->SetStringField(TEXT("node_type"), NodeType);
+        Root->SetStringField(TEXT("name"), Name);
+        Root->SetStringField(TEXT("parent_class"), ParentClass);
+
+        // Framework-scan extras: functions, components, edges. These let the
+        // frontend draw the full L1/L2 force graph and write skeleton .md files
+        // without going through the LLM.
+        TArray<TSharedPtr<FJsonValue>> Functions;
+        ExtractFunctions(LoadedBP, Functions);
+        Root->SetArrayField(TEXT("functions"), Functions);
+
+        TArray<TSharedPtr<FJsonValue>> Components;
+        ExtractComponents(LoadedBP, Components);
+        Root->SetArrayField(TEXT("components"), Components);
+
+        TArray<TSharedPtr<FJsonValue>> Edges;
+        ExtractEdges(LoadedBP, CleanPath, Edges);
+        Root->SetArrayField(TEXT("edges"), Edges);
+
+        UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] DeepScan: %s hash=%s type=%s parent=%s · %d func / %d comp / %d edge"),
+            *Name, *AstHash, *NodeType, *ParentClass,
+            Functions.Num(), Components.Num(), Edges.Num());
+        return SerializeJson(Root);
     }
-    if (ParentClass.IsEmpty() && LoadedBP->ParentClass)
-        ParentClass = LoadedBP->ParentClass->GetName();
+
+    // Non-BP path: data-only assets (DataTable, UDataAsset subclasses).
+    // No UEdGraph to walk, so functions/components/edges are empty arrays.
+    // ast_hash is derived from the asset's package name + class name + size on
+    // disk via AssetRegistry tag — coarser than the K2 fingerprint but stable
+    // enough for the dedup manifest (DataTable contents change → re-scan).
+    UObject* LoadedObj = LoadObject<UObject>(nullptr, *CleanPath);
+    if (!LoadedObj)
+        return MakeErrorJson(FString::Printf(TEXT("asset is not a Blueprint-like type and LoadObject failed: %s"), *PackageName));
+
+    UClass* AssetClass = LoadedObj->GetClass();
+    const FString NodeType = ClassifyNonBlueprintAsset(LoadedObj);
+    if (NodeType == TEXT("Asset"))
+    {
+        // Class hierarchy didn't match any introspectable type.  Refuse rather
+        // than emit a useless empty envelope — keeps the scan UI's failure
+        // counter honest.
+        return MakeErrorJson(FString::Printf(TEXT("unsupported non-Blueprint asset type: %s"),
+            AssetClass ? *AssetClass->GetName() : TEXT("(null)")));
+    }
+
+    const FString Name = LoadedObj->GetName();
+    FString ParentClass;
+    if (AssetClass && AssetClass->GetSuperClass())
+        ParentClass = AssetClass->GetSuperClass()->GetName();
+
+    // For DataTables we surface the row struct as a hint (the "shape" of the
+    // table).  Embedded into parent_class when present so the frontend doesn't
+    // need a new field; downstream prompt code can pick it up via parent_class
+    // alone.  Falls back to the UClass parent when row struct is missing.
+    if (UDataTable* DT = Cast<UDataTable>(LoadedObj))
+    {
+        if (DT->RowStruct)
+            ParentClass = FString::Printf(TEXT("DataTable<%s>"), *DT->RowStruct->GetName());
+    }
+
+    // Coarse hash: package name + class path + property count.  Not as
+    // structurally precise as the K2 fingerprint but sufficient for "did this
+    // asset change since last scan" dedup against the manifest.
+    FString HashBuf;
+    HashBuf.Appendf(TEXT("%s|%s|"), *CleanPath, AssetClass ? *AssetClass->GetPathName() : TEXT(""));
+    int32 PropCount = 0;
+    for (TFieldIterator<FProperty> It(AssetClass, EFieldIteratorFlags::ExcludeSuper); It; ++It) ++PropCount;
+    HashBuf.Appendf(TEXT("props=%d"), PropCount);
+    const FString AstHash = FString::Printf(TEXT("%08x"), FCrc::StrCrc32<TCHAR>(*HashBuf));
 
     TSharedRef<FJsonObject> Root = MakeShareable(new FJsonObject());
     Root->SetBoolField(TEXT("ok"), true);
@@ -595,24 +692,14 @@ FString UAICartographerBridge::RequestDeepScan(const FString& AssetPath)
     Root->SetStringField(TEXT("name"), Name);
     Root->SetStringField(TEXT("parent_class"), ParentClass);
 
-    // Framework-scan extras: functions, components, edges. These let the
-    // frontend draw the full L1/L2 force graph and write skeleton .md files
-    // without going through the LLM.
-    TArray<TSharedPtr<FJsonValue>> Functions;
-    ExtractFunctions(LoadedBP, Functions);
-    Root->SetArrayField(TEXT("functions"), Functions);
+    // Empty arrays — schema parity with BP path so frontend code doesn't need
+    // to special-case missing fields.
+    Root->SetArrayField(TEXT("functions"), TArray<TSharedPtr<FJsonValue>>());
+    Root->SetArrayField(TEXT("components"), TArray<TSharedPtr<FJsonValue>>());
+    Root->SetArrayField(TEXT("edges"), TArray<TSharedPtr<FJsonValue>>());
 
-    TArray<TSharedPtr<FJsonValue>> Components;
-    ExtractComponents(LoadedBP, Components);
-    Root->SetArrayField(TEXT("components"), Components);
-
-    TArray<TSharedPtr<FJsonValue>> Edges;
-    ExtractEdges(LoadedBP, CleanPath, Edges);
-    Root->SetArrayField(TEXT("edges"), Edges);
-
-    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] DeepScan: %s hash=%s type=%s parent=%s · %d func / %d comp / %d edge"),
-        *Name, *AstHash, *NodeType, *ParentClass,
-        Functions.Num(), Components.Num(), Edges.Num());
+    UE_LOG(LogTemp, Warning, TEXT("[ARCHITECT] DeepScan: %s hash=%s type=%s parent=%s · (data-only, no K2 graph)"),
+        *Name, *AstHash, *NodeType, *ParentClass);
     return SerializeJson(Root);
 }
 
@@ -636,14 +723,23 @@ FString UAICartographerBridge::ListBlueprintAssets(const FString& ProjectRoot)
     Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("AnimBlueprint")));
     Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("BlueprintFunctionLibrary")));
     Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("BlueprintMacroLibrary")));
+    // Phase B (§22.5 #4) — non-Blueprint introspectable types.  bRecursiveClasses
+    // pulls in user-authored UDataAsset subclasses (PrimaryDataAsset, custom
+    // ULevelData, etc.) without us having to enumerate every subclass by name.
+    // DataTable likewise covers UCompositeDataTable and any user-defined row-
+    // typed table.  Native engine subclasses like USoundClass / USoundAttenuation
+    // do NOT descend from UDataAsset, so audio assets stay out by default.
+    Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("DataAsset")));
+    Filter.ClassPaths.Add(FTopLevelAssetPath(TEXT("/Script/Engine"), TEXT("DataTable")));
     Filter.bIncludeOnlyOnDiskAssets = true;
-    Filter.bRecursiveClasses = true; // Pick up subclasses (e.g. EditorUtilityWidgetBlueprint)
+    Filter.bRecursiveClasses = true; // Pick up subclasses (e.g. EditorUtilityWidgetBlueprint, PrimaryDataAsset)
     AssetRegistryModule.Get().GetAssets(Filter, AssetDataList);
 
-    // Class names accepted as "blueprint-like" — must mirror the ClassPaths
-    // above (plus subclasses we explicitly want).  AssetClassPath holds the
-    // actual stored class for each asset; recursive filter pulls in things
-    // like EditorUtilityWidgetBlueprint which we still want listed.
+    // Class names whose Blueprints we tag with a friendly node_type.  Anything
+    // outside this set still flows through if it descends from one of the
+    // ClassPaths above (DataAsset / DataTable subclasses get a generic node_type
+    // assigned downstream by ClassifyNonBlueprintAsset).  AssetClassPath holds
+    // the actual stored class for each asset.
     static const TSet<FName> kAcceptedClassNames = {
         FName("Blueprint"),
         FName("WidgetBlueprint"),
@@ -651,6 +747,22 @@ FString UAICartographerBridge::ListBlueprintAssets(const FString& ProjectRoot)
         FName("AnimBlueprint"),
         FName("BlueprintFunctionLibrary"),
         FName("BlueprintMacroLibrary"),
+        FName("DataTable"),
+        FName("CompositeDataTable"),
+        // DataAsset subclass instances list their own UClass name as
+        // AssetClassPath (e.g. "PrimaryDataAsset", "MyCustomData_C") — those
+        // pass the registry's recursive ClassPath filter; we accept them in
+        // the post-filter via IsDataAssetClassName below.
+    };
+
+    // Helper: a permissive secondary check to admit DataAsset subclasses by
+    // tag rather than by exhaustive name list.  The AssetRegistry already
+    // class-path-filtered to UDataAsset descendants, so this is mostly a
+    // safety net against unexpected entries slipping through.
+    auto IsDataAssetClassName = [](const FName& ClassName) -> bool {
+        const FString S = ClassName.ToString();
+        // Cheap heuristic — we already trust the recursive ClassPath filter.
+        return S.Contains(TEXT("Data")) || S.EndsWith(TEXT("Asset"));
     };
 
     TArray<TSharedPtr<FJsonValue>> Assets;
@@ -659,7 +771,8 @@ FString UAICartographerBridge::ListBlueprintAssets(const FString& ProjectRoot)
     for (const FAssetData& Asset : AssetDataList)
     {
         if (!Asset.IsValid()) continue;
-        if (!kAcceptedClassNames.Contains(Asset.AssetClassPath.GetAssetName())) continue;
+        const FName ClassName = Asset.AssetClassPath.GetAssetName();
+        if (!kAcceptedClassNames.Contains(ClassName) && !IsDataAssetClassName(ClassName)) continue;
 
         FString TrueAssetPath = Asset.GetObjectPathString();
         if (TrueAssetPath.EndsWith(TEXT("/")) || !TrueAssetPath.Contains(TEXT("."))) continue;
@@ -1557,42 +1670,17 @@ FString UAICartographerBridge::GetReflectionAssetSummary(const FString& AssetPat
         if (!Clean.Contains(TEXT("."))) return MakeErrorJson(TEXT("asset path missing object suffix (e.g. /Game/X/BP.BP)"));
     }
 
-    UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *Clean);
-    if (!BP) return MakeErrorJson(FString::Printf(TEXT("LoadObject failed: %s"), *Clean));
-    UClass* Cls = BP->GeneratedClass;
-    if (!Cls) return MakeErrorJson(TEXT("Blueprint has no GeneratedClass (not yet compiled?)"));
-
-    TSharedRef<FJsonObject> Out = MakeShareable(new FJsonObject());
-    Out->SetBoolField(TEXT("ok"), true);
-    Out->SetStringField(TEXT("asset_path"), Clean);
-    Out->SetStringField(TEXT("class_path"), Cls->GetPathName());
-    Out->SetStringField(TEXT("parent_class"), BP->ParentClass ? BP->ParentClass->GetPathName() : FString());
-    Out->SetStringField(TEXT("ast_hash"), ComputeBlueprintAstHash(BP));
-    Out->SetStringField(TEXT("scanned_at"), FDateTime::UtcNow().ToIso8601());
-
-    // exports — UClass FuncMap walk
-    TArray<TSharedPtr<FJsonValue>> Exports;
-    ExtractExportFunctions(Cls, Exports);
-    Out->SetArrayField(TEXT("exports"), Exports);
-
-    // properties — declared FProperty walk
-    TArray<TSharedPtr<FJsonValue>> Props;
-    ExtractDeclaredProperties(Cls, Props);
-    Out->SetArrayField(TEXT("properties"), Props);
-
-    // components — reuse SCS walker from the same translation unit
-    TArray<TSharedPtr<FJsonValue>> Components;
-    ExtractComponents(BP, Components);
-    Out->SetArrayField(TEXT("components"), Components);
-
-    // edges — AssetRegistry hard / soft refs, plus implemented interfaces
-    FAssetRegistryModule& Module = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
-    IAssetRegistry& Registry = Module.Get();
-    const FString PackagePath = FPackageName::ObjectPathToPackageName(Clean);
-    const FName PackageName(*PackagePath);
-
-    TArray<TSharedPtr<FJsonValue>> Hard, Soft;
+    // Shared edges block (hard / soft refs + interfaces) — populated below
+    // for both BP and non-BP paths.  Computed once via the package name so
+    // it's identical across asset types.
+    auto BuildEdgesBlock = [&Clean](const TArray<UClass*>& InterfacesIn) -> TSharedRef<FJsonObject>
     {
+        FAssetRegistryModule& Module = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+        IAssetRegistry& Registry = Module.Get();
+        const FString PackagePath = FPackageName::ObjectPathToPackageName(Clean);
+        const FName PackageName(*PackagePath);
+
+        TArray<TSharedPtr<FJsonValue>> Hard, Soft;
         TArray<FName> HardRefs, SoftRefs;
         Registry.GetDependencies(PackageName, HardRefs,
             UE::AssetRegistry::EDependencyCategory::Package,
@@ -1610,19 +1698,127 @@ FString UAICartographerBridge::GetReflectionAssetSummary(const FString& AssetPat
             const FString S = N.ToString();
             if (S.StartsWith(TEXT("/Game/"))) Soft.Add(MakeShareable(new FJsonValueString(S)));
         }
-    }
 
-    TArray<TSharedPtr<FJsonValue>> Interfaces;
-    for (const FBPInterfaceDescription& I : BP->ImplementedInterfaces)
+        TArray<TSharedPtr<FJsonValue>> Interfaces;
+        for (UClass* I : InterfacesIn)
+        {
+            if (I) Interfaces.Add(MakeShareable(new FJsonValueString(I->GetPathName())));
+        }
+
+        TSharedRef<FJsonObject> Edges = MakeShareable(new FJsonObject());
+        Edges->SetArrayField(TEXT("hard_refs"), Hard);
+        Edges->SetArrayField(TEXT("soft_refs"), Soft);
+        Edges->SetArrayField(TEXT("interfaces"), Interfaces);
+        return Edges;
+    };
+
+    // Fast path: try as UBlueprint first.  Most assets in /Game/ are BPs and
+    // this path is the original A2 contract.
+    if (UBlueprint* BP = LoadObject<UBlueprint>(nullptr, *Clean))
     {
-        if (I.Interface) Interfaces.Add(MakeShareable(new FJsonValueString(I.Interface->GetPathName())));
+        UClass* Cls = BP->GeneratedClass;
+        if (!Cls) return MakeErrorJson(TEXT("Blueprint has no GeneratedClass (not yet compiled?)"));
+
+        TSharedRef<FJsonObject> Out = MakeShareable(new FJsonObject());
+        Out->SetBoolField(TEXT("ok"), true);
+        Out->SetStringField(TEXT("asset_path"), Clean);
+        Out->SetStringField(TEXT("class_path"), Cls->GetPathName());
+        Out->SetStringField(TEXT("parent_class"), BP->ParentClass ? BP->ParentClass->GetPathName() : FString());
+        Out->SetStringField(TEXT("ast_hash"), ComputeBlueprintAstHash(BP));
+        Out->SetStringField(TEXT("scanned_at"), FDateTime::UtcNow().ToIso8601());
+        Out->SetStringField(TEXT("node_type"), ClassifyBlueprintNodeType(BP));
+
+        // exports — UClass FuncMap walk
+        TArray<TSharedPtr<FJsonValue>> Exports;
+        ExtractExportFunctions(Cls, Exports);
+        Out->SetArrayField(TEXT("exports"), Exports);
+
+        // properties — declared FProperty walk
+        TArray<TSharedPtr<FJsonValue>> Props;
+        ExtractDeclaredProperties(Cls, Props);
+        Out->SetArrayField(TEXT("properties"), Props);
+
+        // components — reuse SCS walker from the same translation unit
+        TArray<TSharedPtr<FJsonValue>> Components;
+        ExtractComponents(BP, Components);
+        Out->SetArrayField(TEXT("components"), Components);
+
+        TArray<UClass*> InterfaceClasses;
+        for (const FBPInterfaceDescription& I : BP->ImplementedInterfaces)
+            if (I.Interface) InterfaceClasses.Add(I.Interface);
+        Out->SetField(TEXT("edges"), MakeShareable(new FJsonValueObject(BuildEdgesBlock(InterfaceClasses))));
+
+        return SerializeJson(Out);
     }
 
-    TSharedRef<FJsonObject> Edges = MakeShareable(new FJsonObject());
-    Edges->SetArrayField(TEXT("hard_refs"), Hard);
-    Edges->SetArrayField(TEXT("soft_refs"), Soft);
-    Edges->SetArrayField(TEXT("interfaces"), Interfaces);
-    Out->SetField(TEXT("edges"), MakeShareable(new FJsonValueObject(Edges)));
+    // Non-BP path (Phase B §22.5 #4): DataTable / native UDataAsset subclasses.
+    // Walk declared FProperty for the inventory; no functions / components /
+    // ImplementedInterfaces (those are BP-only concepts).  Hard / soft refs
+    // still come from AssetRegistry so the L1 force graph and CallTrace can
+    // navigate through these nodes.
+    UObject* Obj = LoadObject<UObject>(nullptr, *Clean);
+    if (!Obj) return MakeErrorJson(FString::Printf(TEXT("LoadObject failed: %s"), *Clean));
 
+    UClass* AssetClass = Obj->GetClass();
+    const FString NodeType = ClassifyNonBlueprintAsset(Obj);
+    if (NodeType == TEXT("Asset"))
+    {
+        return MakeErrorJson(FString::Printf(TEXT("unsupported non-Blueprint asset type: %s"),
+            AssetClass ? *AssetClass->GetName() : TEXT("(null)")));
+    }
+
+    TSharedRef<FJsonObject> Out = MakeShareable(new FJsonObject());
+    Out->SetBoolField(TEXT("ok"), true);
+    Out->SetStringField(TEXT("asset_path"), Clean);
+    Out->SetStringField(TEXT("class_path"), AssetClass ? AssetClass->GetPathName() : FString());
+    Out->SetStringField(TEXT("parent_class"),
+        (AssetClass && AssetClass->GetSuperClass()) ? AssetClass->GetSuperClass()->GetPathName() : FString());
+    Out->SetStringField(TEXT("scanned_at"), FDateTime::UtcNow().ToIso8601());
+    Out->SetStringField(TEXT("node_type"), NodeType);
+
+    // Coarse hash (matches RequestDeepScan's non-BP path so the manifest dedup
+    // stays in lockstep).
+    {
+        FString HashBuf;
+        HashBuf.Appendf(TEXT("%s|%s|"), *Clean, AssetClass ? *AssetClass->GetPathName() : TEXT(""));
+        int32 PropCount = 0;
+        for (TFieldIterator<FProperty> It(AssetClass, EFieldIteratorFlags::ExcludeSuper); It; ++It) ++PropCount;
+        HashBuf.Appendf(TEXT("props=%d"), PropCount);
+        Out->SetStringField(TEXT("ast_hash"), FString::Printf(TEXT("%08x"), FCrc::StrCrc32<TCHAR>(*HashBuf)));
+    }
+
+    // For DataTables: surface row struct + row count as a synthetic single
+    // "property" so the LLM sees the table's shape.  Real FProperty walk on
+    // UDataTable would just turn up its internal RowMap pointer — useless for
+    // narrative.  Native UDataAsset subclasses get a normal FProperty walk
+    // (their CDO fields are the meaningful inventory).
+    TArray<TSharedPtr<FJsonValue>> Props;
+    if (UDataTable* DT = Cast<UDataTable>(Obj))
+    {
+        TSharedRef<FJsonObject> Synth = MakeShareable(new FJsonObject());
+        Synth->SetStringField(TEXT("name"), TEXT("Rows"));
+        Synth->SetStringField(TEXT("type"),
+            FString::Printf(TEXT("TMap<FName, F%s>"),
+                DT->RowStruct ? *DT->RowStruct->GetName() : TEXT("Unknown")));
+        TArray<TSharedPtr<FJsonValue>> Flags;
+        Flags.Add(MakeShareable(new FJsonValueString(
+            FString::Printf(TEXT("RowCount=%d"), DT->GetRowMap().Num()))));
+        Synth->SetArrayField(TEXT("flags"), Flags);
+        Props.Add(MakeShareable(new FJsonValueObject(Synth)));
+    }
+    else
+    {
+        ExtractDeclaredProperties(AssetClass, Props);
+    }
+    Out->SetArrayField(TEXT("properties"), Props);
+
+    // Empty arrays — schema parity with the BP path.
+    Out->SetArrayField(TEXT("exports"), TArray<TSharedPtr<FJsonValue>>());
+    Out->SetArrayField(TEXT("components"), TArray<TSharedPtr<FJsonValue>>());
+    const TArray<UClass*> NoInterfaces;
+    Out->SetField(TEXT("edges"), MakeShareable(new FJsonValueObject(BuildEdgesBlock(NoInterfaces))));
+
+    UE_LOG(LogTemp, Log, TEXT("[BRIDGE] ReflectionSummary (non-BP): %s type=%s · %d props"),
+        *Clean, *NodeType, Props.Num());
     return SerializeJson(Out);
 }

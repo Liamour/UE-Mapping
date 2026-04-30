@@ -60,7 +60,14 @@ function subdirToType(sub: string): string {
   if (sub.startsWith('CPP')) return 'CPP';
   if (sub.startsWith('Interfaces')) return 'Interface';
   if (sub.startsWith('Components')) return 'Component';
+  if (sub.startsWith('Widgets')) return 'WidgetBlueprint';
+  if (sub.startsWith('Anims')) return 'AnimBlueprint';
+  if (sub.startsWith('Libraries')) return 'FunctionLibrary';
   if (sub.startsWith('Systems')) return 'System';
+  // Phase B (§22.5 #4) — DataTable / DataAsset both land in Data/.  Default
+  // to 'DataAsset' for files without explicit `node_type` frontmatter; the
+  // distinction matters less to the UI than the routing.
+  if (sub.startsWith('Data')) return 'DataAsset';
   return 'Other';
 }
 

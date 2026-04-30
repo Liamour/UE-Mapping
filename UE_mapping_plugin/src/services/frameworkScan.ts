@@ -291,6 +291,10 @@ function subdirForType(nodeType: string): string {
   if (nodeType === 'WidgetBlueprint') return 'Widgets';
   if (nodeType === 'AnimBlueprint') return 'Anims';
   if (nodeType === 'FunctionLibrary' || nodeType === 'MacroLibrary') return 'Libraries';
+  // Phase B (§22.5 #4) — DataTable / native UDataAsset subclasses share one
+  // Data/ subdir.  Splitting them by type adds folder churn for marginal
+  // value at this scale (typical project = a handful of each).
+  if (nodeType === 'DataAsset' || nodeType === 'DataTable') return 'Data';
   return 'Blueprints';
 }
 

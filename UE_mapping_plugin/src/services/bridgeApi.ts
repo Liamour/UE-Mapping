@@ -372,7 +372,10 @@ export function isStaleListenerAvailable(): boolean {
 // ---- A2: Reflection-derived asset summary (HANDOFF §19.3) -----------------
 // Replaces what the LLM used to fragilely extract from k2node dumps.  The
 // bridge walks UClass + AssetRegistry so structural fields land 100% precise.
-// MVP returns BP-only; DataAsset / WBP / Niagara extensions follow in Phase B.
+// Phase B (§22.5 #4) extends coverage to DataTable + native UDataAsset
+// subclasses — those return empty exports/components but still populate
+// properties (FProperty walk) and edges (AssetRegistry refs).  Niagara is
+// out of MVP scope (would need linking the Niagara module in Build.cs).
 
 export interface BridgeFunctionExport {
   name: string;
@@ -398,6 +401,12 @@ export interface BridgeAssetSummary {
   parent_class: string;
   ast_hash: string;
   scanned_at: string;        // ISO-8601 UTC
+  // node_type: friendly classification ("Blueprint", "WidgetBlueprint",
+  // "AnimBlueprint", "Interface", "Component", "FunctionLibrary",
+  // "MacroLibrary", "DataAsset", "DataTable").  Pre-Phase-B builds didn't
+  // emit this on the reflection envelope so the field is optional — callers
+  // should fall back to the deep-scan envelope's node_type if absent.
+  node_type?: string;
   exports: BridgeFunctionExport[];
   properties: BridgePropertyEntry[];
   components: BridgeComponentEntry[];

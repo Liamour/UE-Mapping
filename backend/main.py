@@ -139,6 +139,19 @@ NON-NEGOTIABLE RULES
 - When STRUCTURE shows "(none)" for a section (e.g. no events), the
   corresponding bullet in MEMBER INTERACTIONS may be omitted — don't pad with
   speculation.
+- DATA-ONLY ASSETS (DataTable, UDataAsset subclasses): Functions / Events /
+  Dispatchers / Components / K2 graph edges will all show "(none)" — these
+  assets have no runtime execution path. For these:
+  · EXECUTION FLOW: write one factual sentence stating the asset is data-only
+    and is read by callers at runtime (e.g. "Data-only asset — no execution
+    flow. Read by callers via DataTable RowMap / DataAsset CDO at runtime.")
+  · MEMBER INTERACTIONS: describe the data shape (row struct, key properties)
+    rather than call patterns.
+  · EXTERNAL COUPLING: focus on what consumes this asset based on hard_refs
+    that point INTO this asset (those won't appear in the prompt — note this
+    as "consumed by external systems via hard_ref").
+  · Don't fabricate a flow. Saying "no execution flow" is correct and
+    valuable here.
 """
 
 
@@ -584,10 +597,20 @@ async def analyze_one_node(
     # this, the BP lands in the `_unassigned` bucket and L1 batch never sees
     # it as a member of any system.  Applied whether parse_ok or not — even a
     # malformed LLM response shouldn't strand the BP outside any system.
+    #
+    # §23 hardening: the fallback now gates on _SYSTEM_AXIS_VOCAB so junk
+    # folder names ("Blueprint", "Villagers", "Core") don't leak into the
+    # tag space.  Pre-§23 the BTT_StuckRecover under /Game/Blueprint/Villagers
+    # got tagged `#system/blueprint` (not in vocab) which then surfaced an
+    # empty Systems/blueprint.md.  Phase B (§22.5 #4) DataTable/DataAsset
+    # support amplifies the issue — DT_Jobs lives at /Game/Blueprint/Villagers
+    # too, so without this guard every new data asset would inherit the same
+    # junk axis.
     has_system = any(t.startswith("#system/") for t in (parsed.get("tags") or []))
     if not has_system:
         m = re.match(r"^/Game/([^/]+)/", node.asset_path or "")
-        fallback_axis = m.group(1).lower().strip() if m else "gameplay-core"
+        folder = m.group(1).lower().strip() if m else ""
+        fallback_axis = folder if folder in _SYSTEM_AXIS_VOCAB else "gameplay-core"
         # System tags must come first so existing `tags[0].startswith("#system/")`
         # callers stay happy.
         system_tag = f"#system/{fallback_axis}"
@@ -599,7 +622,8 @@ async def analyze_one_node(
         print(
             f"[SYS_FALLBACK] {node.asset_path} got no usable system tag — "
             f"falling back to path-derived '{fallback_axis}' "
-            f"(parse_ok={parsed.get('parse_ok')})"
+            f"(folder='{folder}', vocab_hit={folder in _SYSTEM_AXIS_VOCAB}, "
+            f"parse_ok={parsed.get('parse_ok')})"
         )
 
     write_result = None
