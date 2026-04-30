@@ -126,9 +126,15 @@ NON-NEGOTIABLE RULES
 - Do NOT restate the inventory — the user is reading the .md alongside this
   analysis and already sees the function / property tables. Your value is the
   NARRATIVE, not duplication.
-- A blueprint may legitimately span multiple systems — list up to 3 in the
-  `system` array, most dominant first.
-- Do not invent tag values. If unsure, pick the closest from the vocabulary.
+- The `system` array MUST contain AT LEAST ONE entry — never empty `[]`.
+  A blueprint may legitimately span multiple systems — list up to 3, most
+  dominant first.  If a BP genuinely fits no specialised axis (utility libs,
+  generic data assets, glue code), use `["gameplay-core"]` as the catch-all.
+  Returning `system: []` is a contract violation and will be rejected.
+- Do not invent tag values — pick ONLY from the vocabulary list above.
+  If multiple are plausible, pick the one matching the asset's folder when
+  obvious (`/Game/UI/...` → `ui`, `/Game/Combat/...` → `combat`), otherwise
+  pick by what the BP actually does at runtime.
 - METADATA block must be valid JSON.
 - When STRUCTURE shows "(none)" for a section (e.g. no events), the
   corresponding bullet in MEMBER INTERACTIONS may be omitted — don't pad with
@@ -452,6 +458,16 @@ class WriteNotesRequest(BaseModel):
 _METADATA_RE = re.compile(r"\[METADATA\](.*?)\[/METADATA\]", re.DOTALL)
 _ANALYSIS_RE = re.compile(r"\[ANALYSIS\](.*?)\[/ANALYSIS\]", re.DOTALL)
 
+# Allowed system axis values — must stay in sync with the SYSTEM_PROMPT
+# vocabulary block.  Used as a guard against weak LLMs that hallucinate tag
+# values like "blueprint" or "core" that aren't in the controlled list.
+_SYSTEM_AXIS_VOCAB = frozenset({
+    "gameplay-core", "combat", "ai", "animation", "physics", "network",
+    "multiplayer-meta", "ui", "audio", "vfx", "cinematic", "camera", "input",
+    "world", "spawn", "persistence", "progression", "economy", "analytics",
+    "tooling",
+})
+
 
 def parse_llm_response(raw: str) -> Dict[str, Any]:
     out: Dict[str, Any] = {
@@ -470,13 +486,27 @@ def parse_llm_response(raw: str) -> Dict[str, Any]:
                 risk = "nominal"
             out["risk_level"] = risk
             tags: List[str] = []
-            for s in md_obj.get("system", []) or []:
+            # Filter LLM-output system tags through the vocabulary guard so
+            # weak models that ignore the controlled list don't pollute the
+            # frontmatter with junk axes (Cropout demo: volcengine doubao
+            # was emitting "blueprint", "characters" etc. that broke L1
+            # batch's system_id discovery).
+            llm_systems_raw = md_obj.get("system") or []
+            llm_systems_clean = [
+                str(s).strip().lower() for s in llm_systems_raw
+                if isinstance(s, str) and str(s).strip().lower() in _SYSTEM_AXIS_VOCAB
+            ]
+            for s in llm_systems_clean[:3]:
                 tags.append(f"#system/{s}")
             if md_obj.get("layer"):
                 tags.append(f"#layer/{md_obj['layer']}")
             if md_obj.get("role"):
                 tags.append(f"#role/{md_obj['role']}")
             out["tags"] = tags
+            # Stash whether the LLM actually produced a usable system tag —
+            # the caller (analyze_one_node) uses this to decide whether to
+            # apply a path-derived fallback before writing the file.
+            out["had_system_tag"] = len(llm_systems_clean) > 0
             out["parse_ok"] = True
         except (json.JSONDecodeError, AttributeError) as e:
             print(f"[SYS_WARN] METADATA block malformed: {e}")
@@ -545,6 +575,32 @@ async def analyze_one_node(
     system_prompt = _apply_language(SYSTEM_PROMPT, language)
     llm_response = await call_llm(provider, system_prompt, user_prompt)
     parsed = parse_llm_response(llm_response.raw_text)
+
+    # Path-derived system fallback — when the LLM gives us no usable system
+    # tag (weak instruction-following on Cropout demo: volcengine doubao
+    # was emitting empty `system: []` for ~92% of BPs), fall back to the
+    # first folder under `/Game/`.  Lowercased to match the controlled-vocab
+    # convention so frontend cardwall / L1 batch see consistent tags.  Without
+    # this, the BP lands in the `_unassigned` bucket and L1 batch never sees
+    # it as a member of any system.  Applied whether parse_ok or not — even a
+    # malformed LLM response shouldn't strand the BP outside any system.
+    has_system = any(t.startswith("#system/") for t in (parsed.get("tags") or []))
+    if not has_system:
+        m = re.match(r"^/Game/([^/]+)/", node.asset_path or "")
+        fallback_axis = m.group(1).lower().strip() if m else "gameplay-core"
+        # System tags must come first so existing `tags[0].startswith("#system/")`
+        # callers stay happy.
+        system_tag = f"#system/{fallback_axis}"
+        rebuilt = [system_tag]
+        for t in parsed.get("tags") or []:
+            if not t.startswith("#system/"):
+                rebuilt.append(t)
+        parsed["tags"] = rebuilt
+        print(
+            f"[SYS_FALLBACK] {node.asset_path} got no usable system tag — "
+            f"falling back to path-derived '{fallback_axis}' "
+            f"(parse_ok={parsed.get('parse_ok')})"
+        )
 
     write_result = None
     if project_root:

@@ -151,15 +151,31 @@ function renderStatus(phase: ProjectScanPhase, lang: 'en' | 'zh'): string | null
         ? `L1 分析中（约 30–60 秒）…`
         : `L1 analysing (~30–60s)…`;
     case 'done': {
-      const l1ok = phase.l1Status?.status === 'COMPLETED';
+      const l1 = phase.l1Status;
       const l2 = phase.l2Status;
       const l2bits = l2 && l2.total_nodes > 0
         ? (zh
             ? `更新 ${l2.completed_nodes} · 跳过 ${l2.skipped_nodes}`
             : `${l2.completed_nodes} updated · ${l2.skipped_nodes} skipped`)
         : null;  // L2 didn't run in single-system mode — don't claim "vault up to date"
-      if (l1ok) {
-        return zh ? `完成 · 此系统的 L1 已更新` : `Done · system L1 written`;
+      if (l1?.status === 'COMPLETED') {
+        // Distinguish single-system vs batch by the number of nodes the
+        // worker reported.  Single-system mode = 1; batch reports the
+        // number of discovered system tags.  Misclaiming "this system L1
+        // updated" after a batch run misled users on Cropout: the batch
+        // skipped systems whose tags weren't in any BP frontmatter.
+        const isSingleSystem = l1.total_nodes === 1;
+        if (isSingleSystem) {
+          return zh ? `完成 · 此系统的 L1 已更新` : `Done · this system's L1 written`;
+        }
+        return zh
+          ? `完成 · 已分析 ${l1.completed_nodes} 个系统${l2bits ? ' · ' + l2bits : ''}`
+          : `Done · ${l1.completed_nodes} system(s) analysed${l2bits ? ' · ' + l2bits : ''}`;
+      }
+      if (l1?.status === 'PARTIAL_FAIL') {
+        return zh
+          ? `部分完成 · 成功 ${l1.completed_nodes} · 失败 ${l1.failed_nodes}`
+          : `Partial · ${l1.completed_nodes} ok · ${l1.failed_nodes} failed`;
       }
       // L1 did NOT complete (failed or cancelled).  l2bits may be null if
       // L2 was skipped; fall back to a generic "done" message in that case.

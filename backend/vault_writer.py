@@ -240,6 +240,14 @@ def _build_frontmatter(
     if node.tags:
         fm["tags"] = node.tags
 
+    # State marker used by the frontend's "skeleton" vs "LLM analysed" pill.
+    # frameworkScan writes `analysis_state: skeleton`; once write_node_file
+    # runs (i.e. an LLM scan touched this node), we promote to 'llm' so the
+    # UI stops showing the skeleton placeholder.  Without this the field
+    # disappears after rescan and the frontend falls back to its 'skeleton'
+    # default — making LLM-analysed BPs look unanalysed.
+    fm["analysis_state"] = "llm"
+
     # AST-DERIVED
     if any([node.exports_functions, node.exports_events, node.exports_dispatchers]):
         exports: Dict[str, Any] = {}
@@ -729,15 +737,23 @@ def collect_l2_metadata(project_root: str) -> List[Dict[str, Any]]:
         systems: List[str] = []
         layer: Optional[str] = None
         role: Optional[str] = None
+        # Tags come in two flavours depending on who wrote the file:
+        #   - frameworkScan (frontend skeleton):  "system/blueprint" (no `#`)
+        #   - L2 LLM writer (parse_llm_response): "#system/combat"
+        # Accept both — otherwise skeleton-tagged BPs (those that L2 hasn't
+        # touched yet, e.g. user only ran framework scan) are invisible to
+        # the L1 batch worker and we'd never produce Systems/blueprint.md.
+        # frontend's vaultIndex.summarize() already does this normalisation.
         for tag in (fm.get("tags") or []):
             if not isinstance(tag, str):
                 continue
-            if tag.startswith("#system/"):
-                systems.append(tag[len("#system/"):])
-            elif tag.startswith("#layer/") and not layer:
-                layer = tag[len("#layer/"):]
-            elif tag.startswith("#role/") and not role:
-                role = tag[len("#role/"):]
+            stripped = tag[1:] if tag.startswith("#") else tag
+            if stripped.startswith("system/"):
+                systems.append(stripped[len("system/"):])
+            elif stripped.startswith("layer/") and not layer:
+                layer = stripped[len("layer/"):]
+            elif stripped.startswith("role/") and not role:
+                role = stripped[len("role/"):]
 
         edges_block = fm.get("edges") or {}
         outbound: List[Dict[str, str]] = []
