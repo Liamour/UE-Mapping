@@ -3,6 +3,7 @@ import {
   isStaleListenerAvailable,
 } from './bridgeApi';
 import { useStaleStore } from '../store/useStaleStore';
+import { maybeAutoApply } from './syncEngine';
 
 // Single-flight stale-sync controller (HANDOFF §20.4 P1).  AppShell calls
 // startStaleSync() on mount; we poll the bridge every POLL_INTERVAL_MS and
@@ -29,7 +30,18 @@ async function pollOnce(): Promise<void> {
   try {
     const since = useStaleStore.getState().latestCounter;
     const result = await bridgeGetStaleEventsSince(since);
+    const beforeCount = useStaleStore.getState().staleByPath.size;
     useStaleStore.getState().applyEvents(result.events, result.latest_counter);
+    const afterCount = useStaleStore.getState().staleByPath.size;
+    // Only invoke auto-apply when the poll actually surfaced new entries.
+    // (afterCount may also drop if dedup retired a renamed pair — that's
+    // also fine to ignore since nothing user-actionable was added.)
+    if (afterCount > beforeCount || result.events.length > 0) {
+      try { await maybeAutoApply(); } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn('[staleSync] auto-apply failed:', e);
+      }
+    }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     useStaleStore.getState().setLastError(msg);

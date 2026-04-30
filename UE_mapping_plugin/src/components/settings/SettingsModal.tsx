@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { useUIStore } from '../../store/useUIStore';
 import { useVaultStore } from '../../store/useVaultStore';
+import { useSyncSettingsStore, PRIORITY, type StaleEventType } from '../../store/useSyncSettingsStore';
 import { rebuildBacklinks, checkBackendHealth, exportVault, downloadJSON, type VaultExportScope } from '../../services/vaultApi';
 import { getBridgeStatus, getCandidateGlobals, isBridgeAvailable, isDeepScanAvailable, isVaultFileWriteAvailable } from '../../services/bridgeApi';
 import { rebuildSystemMOCs } from '../../services/mocGenerator';
+import { isLlmAnalysisAvailable } from '../../services/llmSync';
 import { ScanOrchestrator } from './ScanOrchestrator';
 import { FrameworkScanPanel } from './FrameworkScanPanel';
 import { LLMProviderPanel } from './LLMProviderPanel';
@@ -247,11 +249,156 @@ export const SettingsModal: React.FC = () => {
             <LLMProviderPanel />
           </section>
           <section className="settings-section">
+            <h3>{t({ en: 'Stale-asset auto-sync', zh: '资产变更自动同步' })}</h3>
+            <p className="muted">{t({
+              en: 'When the bridge polls UE every 30 s and finds a changed/added/renamed/removed asset, optionally apply the matching vault operation immediately.',
+              zh: '桥接每 30 秒轮询一次 UE 检测变更，开启后命中变更立刻自动应用到 vault（无需手动点击）。',
+            })}</p>
+            <AutoSyncPanel />
+          </section>
+          <section className="settings-section">
             <h3>{t({ en: 'Vault transport', zh: 'Vault 传输方式' })}</h3>
             <BridgeStatusLine />
           </section>
         </div>
       </div>
+    </div>
+  );
+};
+
+// ---- Auto-sync settings panel -------------------------------------------
+// Persisted via useSyncSettingsStore (localStorage `aicartographer.sync.settings`).
+// The master toggle gates the per-category checkboxes (rendered disabled when
+// auto-sync is off so the user knows where the kill-switch is).  The
+// auto-LLM toggle stays disabled until isLlmAnalysisAvailable() goes true,
+// at which point the same UI activates without changes.
+const AutoSyncPanel: React.FC = () => {
+  const t = useT();
+  const enabled = useSyncSettingsStore((s) => s.autoSyncEnabled);
+  const setEnabled = useSyncSettingsStore((s) => s.setAutoSyncEnabled);
+  const cats = useSyncSettingsStore((s) => s.autoSyncCategories);
+  const toggleCat = useSyncSettingsStore((s) => s.toggleCategory);
+  const autoLlm = useSyncSettingsStore((s) => s.autoLlmAfterSync);
+  const setAutoLlm = useSyncSettingsStore((s) => s.setAutoLlmAfterSync);
+  const confirmFirst = useSyncSettingsStore((s) => s.confirmBeforeApplyAll);
+  const setConfirmFirst = useSyncSettingsStore((s) => s.setConfirmBeforeApplyAll);
+  const lastSyncedAt = useSyncSettingsStore((s) => s.lastSyncedAt);
+
+  const llmReady = isLlmAnalysisAvailable();
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
+        <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+        <span>
+          <span style={{ fontWeight: 600 }}>{t({ en: 'Enable auto-sync', zh: '启用自动同步' })}</span>
+          <div className="muted" style={{ fontSize: 'var(--fs-xs)', marginTop: 2 }}>
+            {t({
+              en: 'Apply detected changes automatically on every 30 s poll, in priority order.',
+              zh: '每次 30 秒轮询命中后按优先级自动应用变更。',
+            })}
+          </div>
+        </span>
+      </label>
+
+      <div style={{
+        marginLeft: 24,
+        opacity: enabled ? 1 : 0.5,
+        pointerEvents: enabled ? 'auto' : 'none',
+      }}>
+        <div className="muted" style={{ fontSize: 'var(--fs-xs)', marginBottom: 6 }}>
+          {t({ en: 'Auto-apply categories:', zh: '自动应用的类别：' })}
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 6 }}>
+          {(['added', 'updated', 'renamed', 'removed'] as StaleEventType[]).map((c) => {
+            const p = PRIORITY[c];
+            return (
+              <label key={c} style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={cats[c]}
+                  onChange={() => toggleCat(c)}
+                />
+                <span style={{
+                  display: 'inline-block',
+                  width: 10, height: 10, borderRadius: 5,
+                  background: p.color, flexShrink: 0,
+                }} />
+                <span>{t(p.label)}</span>
+                {c === 'removed' && (
+                  <span className="muted" style={{ fontSize: 'var(--fs-xs)' }}>
+                    {t({ en: '(default off — protects against UE accidents)', zh: '（默认关 — 防 UE 误删）' })}
+                  </span>
+                )}
+              </label>
+            );
+          })}
+        </div>
+      </div>
+
+      <label
+        style={{
+          display: 'flex', gap: 10, alignItems: 'flex-start',
+          cursor: llmReady ? 'pointer' : 'not-allowed',
+          opacity: llmReady ? 1 : 0.65,
+        }}
+        title={llmReady
+          ? t({ en: 'Run LLM deep analysis after each auto-sync', zh: '每次自动同步后运行 LLM 深度分析' })
+          : t({ en: 'RAG + LLM pipeline not yet wired — toggle is preserved for when it lands.', zh: 'RAG + LLM 流水线尚未上线 — 选择已保存，待上线后自动启用。' })}
+      >
+        <input
+          type="checkbox"
+          checked={autoLlm}
+          onChange={(e) => setAutoLlm(e.target.checked)}
+          disabled={!llmReady}
+        />
+        <span>
+          <span style={{ fontWeight: 600 }}>
+            {t({ en: 'Auto-run LLM analysis after sync', zh: '同步后自动运行 LLM 分析' })}
+          </span>
+          <span style={{
+            marginLeft: 8,
+            padding: '1px 6px',
+            borderRadius: 4,
+            fontSize: 'var(--fs-xs)',
+            fontWeight: 700,
+            background: llmReady ? '#16a34a' : '#94a3b8',
+            color: '#fff',
+          }}>
+            {llmReady ? t({ en: 'READY', zh: '可用' }) : t({ en: 'NOT YET', zh: '暂未启用' })}
+          </span>
+          <div className="muted" style={{ fontSize: 'var(--fs-xs)', marginTop: 2 }}>
+            {t({
+              en: 'Layered on top of the auto-applied skeleton; will activate when the RAG + LLM pipeline lands.',
+              zh: '在自动写入的骨架基础上叠加分析；待 RAG + LLM 流水线上线后自动启用。',
+            })}
+          </div>
+        </span>
+      </label>
+
+      <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', cursor: 'pointer' }}>
+        <input type="checkbox" checked={confirmFirst} onChange={(e) => setConfirmFirst(e.target.checked)} />
+        <span>
+          <span style={{ fontWeight: 600 }}>
+            {t({ en: 'Confirm before "Apply all"', zh: '"一键应用全部"前先确认' })}
+          </span>
+          <div className="muted" style={{ fontSize: 'var(--fs-xs)', marginTop: 2 }}>
+            {t({
+              en: 'Show a summary modal before the manual one-click sync runs.  Auto-sync is silent regardless.',
+              zh: '点击"一键应用全部"前先弹出摘要弹窗。自动同步无论如何都是静默的。',
+            })}
+          </div>
+        </span>
+      </label>
+
+      {lastSyncedAt && (
+        <div className="muted" style={{ fontSize: 'var(--fs-xs)' }}>
+          {t({
+            en: `Last successful sync: ${new Date(lastSyncedAt).toLocaleString()}`,
+            zh: `上次成功同步：${new Date(lastSyncedAt).toLocaleString()}`,
+          })}
+        </div>
+      )}
     </div>
   );
 };

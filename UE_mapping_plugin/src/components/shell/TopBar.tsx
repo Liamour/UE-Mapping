@@ -3,29 +3,31 @@ import { useUIStore } from '../../store/useUIStore';
 import { useVaultStore } from '../../store/useVaultStore';
 import { useTabsStore } from '../../store/useTabsStore';
 import { useStaleStore, type StaleEntry } from '../../store/useStaleStore';
-import { applyVaultRename, deleteVaultFile } from '../../services/vaultApi';
+import {
+  useSyncSettingsStore,
+  PRIORITY,
+  compareByPriority,
+  type StaleEventType,
+} from '../../store/useSyncSettingsStore';
+import { applyOne, applyAll, tallyStale, type SyncOutcome } from '../../services/syncEngine';
+import { isLlmAnalysisAvailable } from '../../services/llmSync';
 import { useT } from '../../utils/i18n';
 
-// TopBar — back button + AICartographer title + stale-asset badge (left),
-// search trigger (center), project root + refresh + right-pane toggle (right).
+// TopBar — back button + title + stale-asset badge (left), search trigger
+// (center), project root + refresh + right-pane toggle (right).
 //
-// The stale badge sits in topbar-left, on purpose: the original right-side
-// placement was too far from the user's gaze line to draw attention.
-//
-// Per-event Apply semantics:
-//   renamed → rename .md (preserves NOTES) + update frontmatter
-//   removed → delete the .md outright (asset is gone, the note is moot)
-//   added   → no .md exists yet; user dismisses and runs Framework scan
-//             from Settings to mint a skeleton.  We don't auto-scan because
-//             the user might be batching multiple new assets.
-//   updated → no .md change required at this layer; user dismisses, then
-//             reruns Framework scan or per-node Deep reasoning later.
+// Stale dropdown UX:
+//   • Badge tinted by the HIGHEST-priority bucket present (red → orange →
+//     green → grey).  Compact corner counts per bucket so users see the
+//     distribution without opening the dropdown.
+//   • Rows sorted by priority asc, then timestamp desc.
+//   • Each row's Apply button verb + colour matches its event type so
+//     "what will the click do" reads at a glance.
+//   • One-click "Apply all" → confirm modal listing per-bucket counts and
+//     an LLM-analysis checkbox (currently disabled until RAG+LLM lands).
 
 type ActionStatus = 'idle' | 'busy' | 'ok' | 'error';
-interface ActionState {
-  status: ActionStatus;
-  message?: string;
-}
+interface ActionState { status: ActionStatus; message?: string; }
 
 export const TopBar: React.FC = () => {
   const t = useT();
@@ -39,14 +41,16 @@ export const TopBar: React.FC = () => {
   const navigateActive = useTabsStore((s) => s.navigateActive);
   const activeTab = useTabsStore((s) => s.tabs.find((t) => t.id === s.activeId));
   const staleByPath = useStaleStore((s) => s.staleByPath);
-  const removeRename = useStaleStore((s) => s.removeRename);
-  const removePath = useStaleStore((s) => s.removePath);
   const clearAllStale = useStaleStore((s) => s.clearAll);
-  const staleCount = staleByPath.size;
+  const confirmBeforeApplyAll = useSyncSettingsStore((s) => s.confirmBeforeApplyAll);
+  const autoLlmAfterSync = useSyncSettingsStore((s) => s.autoLlmAfterSync);
+  const setAutoLlmAfterSync = useSyncSettingsStore((s) => s.setAutoLlmAfterSync);
+
   const [staleOpen, setStaleOpen] = useState(false);
   const [actions, setActions] = useState<Map<string, ActionState>>(new Map());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   const canGoBack = (activeTab?.history.length ?? 0) > 0;
 
@@ -58,20 +62,13 @@ export const TopBar: React.FC = () => {
     });
   };
 
-  // Title → relative_path index built from vault file list.  We use this
-  // (not manifest.entries — which the current backend doesn't populate
-  // with asset_path) to match each stale event back to its vault note.
-  // Asset paths end in `/Game/.../X.X` and our file titles are `X`.
+  // Title → relative_path index (used to show "no vault note" hints in rows).
   const nameToRelative = useMemo(() => {
     const idx = new Map<string, string>();
     for (const f of files) idx.set(f.title, f.relative_path);
     return idx;
   }, [files]);
 
-  // For renames, the vault note still lives under the OLD title until the
-  // user applies the rename.  For all other events the note (if any) is
-  // keyed by the current path.  Returns undefined when no .md exists, in
-  // which case the row's Apply button is hidden.
   const findRelativeFor = (entry: StaleEntry): string | undefined => {
     if (entry.type === 'renamed' && entry.previousPath) {
       const oldName = assetName(entry.previousPath);
@@ -80,26 +77,16 @@ export const TopBar: React.FC = () => {
     return nameToRelative.get(assetName(entry.path));
   };
 
-  // Sort by recency so latest changes surface first.
   const staleEntries = useMemo(
-    () => Array.from(staleByPath.values()).sort((a, b) => b.timestampSec - a.timestampSec),
+    () => Array.from(staleByPath.values()).slice().sort(compareByPriority),
     [staleByPath],
   );
 
-  const entryKey = (e: StaleEntry) => `${e.path}::${e.previousPath ?? ''}`;
+  const tally = useMemo(() => tallyStale(), [staleByPath]);
+  const staleCount = staleEntries.length;
+  const headerColor = tally.highestPriority ? PRIORITY[tally.highestPriority].color : '#dc2626';
 
-  // Counts of each kind of "actionable" entry — drives the Apply All summary.
-  const actionable = useMemo(() => {
-    let renames = 0, deletes = 0, dismissable = 0;
-    for (const e of staleEntries) {
-      if (e.type === 'renamed' && e.previousPath && findRelativeFor(e)) renames++;
-      else if (e.type === 'removed' && findRelativeFor(e)) deletes++;
-      else if (e.type === 'added' || e.type === 'updated') dismissable++;
-      // removed-but-no-vault-note also dismissable
-      else if (e.type === 'removed' && !findRelativeFor(e)) dismissable++;
-    }
-    return { renames, deletes, dismissable, total: staleEntries.length };
-  }, [staleEntries, nameToRelative]);
+  const entryKey = (e: StaleEntry) => `${e.path}::${e.previousPath ?? ''}`;
 
   const onStaleItemClick = (entry: StaleEntry) => {
     const rel = findRelativeFor(entry);
@@ -112,110 +99,48 @@ export const TopBar: React.FC = () => {
     setStaleOpen(false);
   };
 
-  // ---- Per-event apply handlers --------------------------------------------
-
-  // Apply a single rename: move the vault .md to match the new asset name,
-  // update its frontmatter (preserving body + NOTES).  Returns true on
-  // success so the caller can refresh the vault index.
-  const onApplyRename = async (entry: StaleEntry): Promise<boolean> => {
-    if (!projectRoot) return false;
-    if (entry.type !== 'renamed' || !entry.previousPath) return false;
-    const oldRel = findRelativeFor(entry);
+  // ---- Per-row apply -------------------------------------------------------
+  // Delegates to the shared sync engine so this UI doesn't duplicate logic.
+  // Translates the SyncOutcome into per-row UI state.
+  const applyRow = async (entry: StaleEntry) => {
     const key = entryKey(entry);
-    if (!oldRel) {
-      setEntryAction(key, {
-        status: 'error',
-        message: t({
-          en: `No vault note found for ${assetName(entry.previousPath)}`,
-          zh: `找不到 ${assetName(entry.previousPath)} 的 vault 笔记`,
-        }),
-      });
-      return false;
-    }
-    const newName = assetName(entry.path);
     setEntryAction(key, { status: 'busy' });
-    try {
-      await applyVaultRename(projectRoot, oldRel, newName, entry.path);
-      removeRename(entry.path, entry.previousPath);
+    const outcome = await applyOne(entry, { withLlm: false });
+    if (outcome.ok) {
       setEntryAction(key, { status: 'ok' });
-      return true;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setEntryAction(key, { status: 'error', message: msg });
-      return false;
-    }
-  };
-
-  // Apply a single delete: remove the vault .md entirely.
-  const onApplyDelete = async (entry: StaleEntry): Promise<boolean> => {
-    if (!projectRoot) return false;
-    if (entry.type !== 'removed') return false;
-    const rel = findRelativeFor(entry);
-    const key = entryKey(entry);
-    if (!rel) {
-      // No vault note to delete — just dismiss the badge.
-      removePath(entry.path);
-      setEntryAction(key, { status: 'ok' });
-      return true;
-    }
-    setEntryAction(key, { status: 'busy' });
-    try {
-      await deleteVaultFile(projectRoot, rel);
-      removePath(entry.path);
-      setEntryAction(key, { status: 'ok' });
-      return true;
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setEntryAction(key, { status: 'error', message: msg });
-      return false;
-    }
-  };
-
-  // Dismiss: remove the entry from the badge without touching the vault.
-  // For added/updated this is the primary action (the user enriches via
-  // Framework scan or Deep reasoning later).  For removed-without-note it
-  // is the only sensible action.
-  const onDismiss = (entry: StaleEntry) => {
-    if (entry.type === 'renamed' && entry.previousPath) {
-      removeRename(entry.path, entry.previousPath);
+      try { await loadIndex(); } catch { /* non-fatal */ }
     } else {
-      removePath(entry.path);
+      setEntryAction(key, { status: 'error', message: outcome.message });
     }
   };
 
-  // ---- Bulk Apply All -------------------------------------------------------
-  // Walks every entry and applies the type-appropriate action: rename →
-  // applyRename, remove → deleteVault, added/updated → dismiss.  Errors are
-  // collected per-entry so a single failure doesn't abort the rest.
-  const onApplyAll = async () => {
-    if (!projectRoot) return;
+  // ---- Bulk Apply All ------------------------------------------------------
+  // confirmBeforeApplyAll (persisted) decides whether we open the confirm
+  // modal first or fire immediately.  The modal is also the only place the
+  // user can opt into LLM analysis on a per-run basis.
+  const onClickApplyAll = () => {
+    if (staleEntries.length === 0) return;
+    if (confirmBeforeApplyAll) setConfirmOpen(true);
+    else void runApplyAll(autoLlmAfterSync);
+  };
+
+  const runApplyAll = async (withLlm: boolean) => {
+    setConfirmOpen(false);
     setBulkBusy(true);
     setBulkError(null);
-    let touched = false;
-    let errors = 0;
-    // Snapshot the entries — we mutate the store as we go.
-    const snapshot = staleEntries.slice();
-    for (const e of snapshot) {
-      let ok = false;
-      if (e.type === 'renamed' && e.previousPath && findRelativeFor(e)) {
-        ok = await onApplyRename(e);
-      } else if (e.type === 'removed') {
-        ok = await onApplyDelete(e);
-      } else {
-        // added / updated → dismiss
-        onDismiss(e);
-        ok = true;
-      }
-      if (ok) touched = true;
-      else errors++;
-    }
-    if (touched) {
-      try { await loadIndex(); } catch { /* sidebar refresh non-fatal */ }
-    }
-    if (errors > 0) {
+    const report = await applyAll({
+      withLlm,
+      onProgress: (_done, _total, last) => {
+        const key = entryKey(last.entry);
+        setEntryAction(key, last.ok
+          ? { status: 'ok' }
+          : { status: 'error', message: last.message });
+      },
+    });
+    if (report.failed > 0) {
       setBulkError(t({
-        en: `${errors} change(s) failed — see per-row messages`,
-        zh: `${errors} 处变更未能应用 — 见每行错误`,
+        en: `${report.failed} change(s) failed — see per-row messages`,
+        zh: `${report.failed} 处变更未能应用 — 见每行错误`,
       }));
     }
     setBulkBusy(false);
@@ -240,14 +165,14 @@ export const TopBar: React.FC = () => {
                 alignItems: 'center',
                 gap: 6,
                 padding: '6px 14px',
-                background: '#dc2626',
+                background: headerColor,
                 color: '#fff',
                 border: 'none',
                 borderRadius: 16,
                 fontSize: 'var(--fs-sm)',
                 fontWeight: 700,
                 cursor: 'pointer',
-                boxShadow: '0 2px 6px rgba(220, 38, 38, 0.4)',
+                boxShadow: `0 2px 6px ${headerColor}66`,
                 letterSpacing: '0.01em',
               }}
               title={t({
@@ -256,25 +181,23 @@ export const TopBar: React.FC = () => {
               })}
             >
               ⚠ {staleCount} {t({
-                en: staleCount === 1 ? 'asset changed' : 'assets changed',
+                en: staleCount === 1 ? 'change' : 'changes',
                 zh: '处变更',
               })}
+              <BadgeTallyChips tally={tally} />
               <span style={{ marginLeft: 4, opacity: 0.85, fontSize: 'var(--fs-xs)' }}>▾</span>
             </button>
             {staleOpen && (
               <>
-                <div
-                  onClick={() => setStaleOpen(false)}
-                  style={{ position: 'fixed', inset: 0, zIndex: 1000 }}
-                />
+                <div onClick={() => setStaleOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 1000 }} />
                 <div
                   style={{
                     position: 'absolute',
                     top: 'calc(100% + 6px)',
                     left: 0,
-                    minWidth: 460,
-                    maxWidth: 620,
-                    maxHeight: 540,
+                    minWidth: 480,
+                    maxWidth: 640,
+                    maxHeight: 560,
                     overflowY: 'auto',
                     background: 'var(--color-surface, #fff)',
                     border: '1px solid var(--color-border, rgba(0,0,0,0.12))',
@@ -283,112 +206,23 @@ export const TopBar: React.FC = () => {
                     zIndex: 1001,
                   }}
                 >
-                  <div
-                    style={{
-                      padding: '10px 14px',
-                      borderBottom: '1px solid rgba(0,0,0,0.08)',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      gap: 10,
-                      flexWrap: 'wrap',
-                    }}
-                  >
-                    <span
-                      style={{
-                        fontSize: 'var(--fs-xs)',
-                        fontWeight: 700,
-                        color: 'var(--color-text-muted, #666)',
-                        letterSpacing: '0.06em',
-                        textTransform: 'uppercase',
-                      }}
-                    >
-                      {t({
-                        en: `${staleCount} change(s) since last scan`,
-                        zh: `自上次扫描以来 ${staleCount} 处变更`,
-                      })}
-                    </span>
-                    <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                      <button
-                        onClick={onApplyAll}
-                        disabled={bulkBusy}
-                        style={{
-                          padding: '4px 10px',
-                          background: '#dc2626',
-                          color: '#fff',
-                          border: 'none',
-                          borderRadius: 6,
-                          fontSize: 'var(--fs-xs)',
-                          fontWeight: 700,
-                          cursor: bulkBusy ? 'wait' : 'pointer',
-                          opacity: bulkBusy ? 0.6 : 1,
-                        }}
-                        title={t({
-                          en: 'Rename matched .md, delete .md for removed assets, dismiss the rest. Refreshes the file tree at the end.',
-                          zh: '一键应用：重命名匹配的 .md、删除已移除资产对应的 .md、其余项忽略。完成后刷新文件树。',
-                        })}
-                      >
-                        {bulkBusy
-                          ? t({ en: 'Applying…', zh: '应用中…' })
-                          : t({
-                              en: `Apply all (${actionable.renames + actionable.deletes} ops · ${actionable.dismissable} dismiss)`,
-                              zh: `一键应用全部（${actionable.renames + actionable.deletes} 项操作 · ${actionable.dismissable} 项忽略）`,
-                            })}
-                      </button>
-                      <button
-                        onClick={() => { clearAllStale(); setActions(new Map()); setBulkError(null); }}
-                        disabled={bulkBusy}
-                        style={{
-                          padding: '4px 10px',
-                          background: 'transparent',
-                          color: 'var(--color-text-muted, #666)',
-                          border: '1px solid rgba(0,0,0,0.15)',
-                          borderRadius: 6,
-                          fontSize: 'var(--fs-xs)',
-                          fontWeight: 600,
-                          cursor: bulkBusy ? 'wait' : 'pointer',
-                        }}
-                        title={t({
-                          en: 'Clear the badge without touching any vault file',
-                          zh: '仅清除徽标，不修改任何 vault 文件',
-                        })}
-                      >
-                        {t({ en: 'Dismiss all', zh: '全部忽略' })}
-                      </button>
-                    </div>
-                  </div>
+                  <DropdownHeader
+                    tally={tally}
+                    bulkBusy={bulkBusy}
+                    onApplyAll={onClickApplyAll}
+                    onDismissAll={() => { clearAllStale(); setActions(new Map()); setBulkError(null); }}
+                    t={t}
+                  />
                   {bulkError && (
-                    <div
-                      style={{
-                        padding: '8px 14px',
-                        background: 'rgba(220, 38, 38, 0.08)',
-                        color: '#b91c1c',
-                        fontSize: 'var(--fs-xs)',
-                        borderBottom: '1px solid rgba(0,0,0,0.05)',
-                      }}
-                    >
-                      {bulkError}
-                    </div>
-                  )}
-                  <div
-                    style={{
+                    <div style={{
                       padding: '8px 14px',
-                      background: 'rgba(0,0,0,0.025)',
+                      background: 'rgba(220, 38, 38, 0.08)',
+                      color: '#b91c1c',
                       fontSize: 'var(--fs-xs)',
-                      color: 'var(--color-text-muted, #666)',
                       borderBottom: '1px solid rgba(0,0,0,0.05)',
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    {t({
-                      en: 'Type chips: ',
-                      zh: '类型说明：',
-                    })}
-                    <Chip color={typeColor('renamed')} label={t({ en: 'renamed', zh: '重命名' })} /> {t({ en: 'X → Y', zh: '编辑器中改名' })} ·{' '}
-                    <Chip color={typeColor('removed')} label={t({ en: 'deleted', zh: '已删除' })} /> {t({ en: 'asset gone — Apply removes the .md', zh: '资产已删除 — 应用即删除对应 .md' })} ·{' '}
-                    <Chip color={typeColor('added')} label={t({ en: 'added', zh: '新增' })} /> {t({ en: 'no .md yet — Dismiss then run Framework scan', zh: '暂无 .md — 忽略后到设置运行框架扫描' })} ·{' '}
-                    <Chip color={typeColor('updated')} label={t({ en: 'updated', zh: '已修改' })} /> {t({ en: 'asset re-saved — rescan to refresh', zh: '资产已重新保存 — 重新扫描以刷新' })}
-                  </div>
+                    }}>{bulkError}</div>
+                  )}
+                  <TypeLegend t={t} />
                   <ul style={{ listStyle: 'none', margin: 0, padding: 0 }}>
                     {staleEntries.map((e) => {
                       const rel = findRelativeFor(e);
@@ -408,21 +242,16 @@ export const TopBar: React.FC = () => {
                             alignItems: 'center',
                             gap: 12,
                             opacity: action?.status === 'ok' ? 0.55 : 1,
+                            // Left-edge stripe in the priority colour for
+                            // at-a-glance type recognition without reading.
+                            borderLeft: `4px solid ${PRIORITY[e.type].color}`,
                           }}
                         >
                           <div
                             onClick={() => navigable && onStaleItemClick(e)}
-                            style={{
-                              minWidth: 0,
-                              flex: 1,
-                              cursor: navigable ? 'pointer' : 'default',
-                            }}
-                            onMouseEnter={(ev) => {
-                              if (navigable) (ev.currentTarget as HTMLElement).style.color = '#dc2626';
-                            }}
-                            onMouseLeave={(ev) => {
-                              (ev.currentTarget as HTMLElement).style.color = '';
-                            }}
+                            style={{ minWidth: 0, flex: 1, cursor: navigable ? 'pointer' : 'default' }}
+                            onMouseEnter={(ev) => { if (navigable) (ev.currentTarget as HTMLElement).style.color = PRIORITY[e.type].color; }}
+                            onMouseLeave={(ev) => { (ev.currentTarget as HTMLElement).style.color = ''; }}
                             title={navigable ? t({ en: 'Click to open this blueprint\'s vault note', zh: '点击打开该蓝图的 vault 笔记' }) : t({ en: 'No vault note for this asset yet', zh: '该资产暂无 vault 笔记' })}
                           >
                             <div style={{ fontWeight: 600, fontSize: 'var(--fs-sm)' }}>
@@ -441,50 +270,29 @@ export const TopBar: React.FC = () => {
                                 </span>
                               )}
                             </div>
-                            <div
-                              style={{
-                                fontSize: 'var(--fs-xs)',
-                                color: 'var(--color-text-muted, #888)',
-                                marginTop: 2,
-                                whiteSpace: 'nowrap',
-                                overflow: 'hidden',
-                                textOverflow: 'ellipsis',
-                              }}
-                            >
-                              {e.path}
-                            </div>
+                            <div style={{
+                              fontSize: 'var(--fs-xs)',
+                              color: 'var(--color-text-muted, #888)',
+                              marginTop: 2,
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                            }}>{e.path}</div>
                             {action?.status === 'error' && action.message && (
-                              <div
-                                style={{
-                                  marginTop: 4,
-                                  fontSize: 'var(--fs-xs)',
-                                  color: '#b91c1c',
-                                  whiteSpace: 'normal',
-                                }}
-                              >
+                              <div style={{ marginTop: 4, fontSize: 'var(--fs-xs)', color: '#b91c1c', whiteSpace: 'normal' }}>
                                 {action.message}
                               </div>
                             )}
                           </div>
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                            <Chip color={typeColor(e.type)} label={typeLabel(e.type, t)} />
+                            <PriorityChip type={e.type} t={t} />
                             <ApplyButton
                               entry={e}
                               navigable={navigable}
                               busy={action?.status === 'busy'}
                               done={action?.status === 'ok'}
                               t={t}
-                              onApply={async () => {
-                                if (e.type === 'renamed') {
-                                  const ok = await onApplyRename(e);
-                                  if (ok) await loadIndex();
-                                } else if (e.type === 'removed') {
-                                  const ok = await onApplyDelete(e);
-                                  if (ok) await loadIndex();
-                                } else {
-                                  onDismiss(e);
-                                }
-                              }}
+                              onApply={() => { void applyRow(e); }}
                             />
                           </div>
                         </li>
@@ -516,19 +324,175 @@ export const TopBar: React.FC = () => {
           className="iconbtn"
           onClick={() => loadIndex()}
           title={lastLoadedAt
-            ? t({
-                en: `Last loaded ${new Date(lastLoadedAt).toLocaleTimeString()}`,
-                zh: `上次加载于 ${new Date(lastLoadedAt).toLocaleTimeString()}`,
-              })
+            ? t({ en: `Last loaded ${new Date(lastLoadedAt).toLocaleTimeString()}`, zh: `上次加载于 ${new Date(lastLoadedAt).toLocaleTimeString()}` })
             : t({ en: 'Refresh vault', zh: '刷新 vault' })}
         >↻</button>
+        <button className="iconbtn" title={t({ en: 'Toggle right pane', zh: '切换右侧面板' })} onClick={toggleRight}>▤</button>
+      </div>
+
+      {confirmOpen && (
+        <ApplyAllConfirmModal
+          tally={tally}
+          autoLlm={autoLlmAfterSync}
+          setAutoLlm={setAutoLlmAfterSync}
+          onCancel={() => setConfirmOpen(false)}
+          onConfirm={(withLlm) => { void runApplyAll(withLlm); }}
+          t={t}
+        />
+      )}
+    </div>
+  );
+};
+
+// ---- Sub-components -------------------------------------------------------
+
+const DropdownHeader: React.FC<{
+  tally: ReturnType<typeof tallyStale>;
+  bulkBusy: boolean;
+  onApplyAll: () => void;
+  onDismissAll: () => void;
+  t: ReturnType<typeof useT>;
+}> = ({ tally, bulkBusy, onApplyAll, onDismissAll, t }) => {
+  const ops = tally.added + tally.updated + tally.renamed + tally.removed;
+  return (
+    <div style={{
+      padding: '10px 14px',
+      borderBottom: '1px solid rgba(0,0,0,0.08)',
+      display: 'flex',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      gap: 10,
+      flexWrap: 'wrap',
+    }}>
+      <span style={{
+        fontSize: 'var(--fs-xs)',
+        fontWeight: 700,
+        color: 'var(--color-text-muted, #666)',
+        letterSpacing: '0.06em',
+        textTransform: 'uppercase',
+      }}>
+        {t({
+          en: `${tally.total} change(s) since last scan`,
+          zh: `自上次扫描以来 ${tally.total} 处变更`,
+        })}
+      </span>
+      <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
         <button
-          className="iconbtn"
-          title={t({ en: 'Toggle right pane', zh: '切换右侧面板' })}
-          onClick={toggleRight}
-        >▤</button>
+          onClick={onApplyAll}
+          disabled={bulkBusy || ops === 0}
+          style={{
+            padding: '4px 10px',
+            background: bulkBusy ? '#94a3b8' : '#dc2626',
+            color: '#fff',
+            border: 'none',
+            borderRadius: 6,
+            fontSize: 'var(--fs-xs)',
+            fontWeight: 700,
+            cursor: bulkBusy ? 'wait' : 'pointer',
+            opacity: bulkBusy ? 0.6 : 1,
+          }}
+          title={t({
+            en: 'Apply every detected change in priority order: added → updated → renamed → removed',
+            zh: '按优先级一次性应用：新增 → 已修改 → 重命名 → 已删除',
+          })}
+        >
+          {bulkBusy
+            ? t({ en: 'Applying…', zh: '应用中…' })
+            : t({ en: `Apply all (${ops})`, zh: `一键应用全部（${ops} 项）` })}
+        </button>
+        <button
+          onClick={onDismissAll}
+          disabled={bulkBusy}
+          style={{
+            padding: '4px 10px',
+            background: 'transparent',
+            color: 'var(--color-text-muted, #666)',
+            border: '1px solid rgba(0,0,0,0.15)',
+            borderRadius: 6,
+            fontSize: 'var(--fs-xs)',
+            fontWeight: 600,
+            cursor: bulkBusy ? 'wait' : 'pointer',
+          }}
+          title={t({ en: 'Clear the badge without touching any vault file', zh: '仅清除徽标，不修改任何 vault 文件' })}
+        >
+          {t({ en: 'Dismiss all', zh: '全部忽略' })}
+        </button>
       </div>
     </div>
+  );
+};
+
+const TypeLegend: React.FC<{ t: ReturnType<typeof useT> }> = ({ t }) => (
+  <div style={{
+    padding: '8px 14px',
+    background: 'rgba(0,0,0,0.025)',
+    fontSize: 'var(--fs-xs)',
+    color: 'var(--color-text-muted, #666)',
+    borderBottom: '1px solid rgba(0,0,0,0.05)',
+    lineHeight: 1.6,
+  }}>
+    <PriorityChip type="added" t={t} /> P0 {t({ en: 'new asset — Apply mints skeleton .md', zh: '新资产 — 应用即生成骨架 .md' })} ·{' '}
+    <PriorityChip type="updated" t={t} /> P1 {t({ en: 're-saved — Apply re-fingerprints', zh: '已重新保存 — 应用即重新提取 AST' })} ·{' '}
+    <PriorityChip type="renamed" t={t} /> P2 {t({ en: 'X → Y rename', zh: '编辑器中改名' })} ·{' '}
+    <PriorityChip type="removed" t={t} /> P3 {t({ en: 'asset gone — Apply removes the .md', zh: '资产已删除 — 应用即同步删除 .md' })}
+  </div>
+);
+
+const PriorityChip: React.FC<{ type: StaleEventType; t: ReturnType<typeof useT> }> = ({ type, t }) => {
+  const p = PRIORITY[type];
+  return (
+    <span style={{
+      display: 'inline-block',
+      padding: '3px 9px',
+      borderRadius: 10,
+      fontSize: 'var(--fs-xs)',
+      fontWeight: 700,
+      background: p.color,
+      color: p.fg,
+      whiteSpace: 'nowrap',
+    }}>
+      {t(p.label)}
+    </span>
+  );
+};
+
+// Compact corner pill on the badge: 🔴2  🟠1  🟢3  ⚫1.  Only renders the
+// non-zero buckets so a 1-event badge stays minimal.
+const BadgeTallyChips: React.FC<{ tally: ReturnType<typeof tallyStale> }> = ({ tally }) => {
+  const items: Array<{ type: StaleEventType; count: number }> = [];
+  if (tally.added > 0) items.push({ type: 'added', count: tally.added });
+  if (tally.updated > 0) items.push({ type: 'updated', count: tally.updated });
+  if (tally.renamed > 0) items.push({ type: 'renamed', count: tally.renamed });
+  if (tally.removed > 0) items.push({ type: 'removed', count: tally.removed });
+  if (items.length <= 1) return null;     // single bucket — total in main label is enough
+  return (
+    <span style={{ marginLeft: 6, display: 'inline-flex', gap: 4 }}>
+      {items.map((it) => (
+        <span
+          key={it.type}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 2,
+            padding: '0 5px',
+            borderRadius: 8,
+            background: 'rgba(255,255,255,0.22)',
+            fontSize: 'var(--fs-xs)',
+            fontWeight: 700,
+          }}
+          title={`${it.count} × ${PRIORITY[it.type].label.en}`}
+        >
+          <span style={{
+            width: 8,
+            height: 8,
+            borderRadius: 4,
+            background: PRIORITY[it.type].color,
+            border: '1px solid rgba(255,255,255,0.6)',
+          }} />
+          {it.count}
+        </span>
+      ))}
+    </span>
   );
 };
 
@@ -538,56 +502,53 @@ const ApplyButton: React.FC<{
   busy: boolean;
   done: boolean;
   t: ReturnType<typeof useT>;
-  onApply: () => void | Promise<void>;
+  onApply: () => void;
 }> = ({ entry, navigable, busy, done, t, onApply }) => {
-  // Different verbs / colors per event type so the user immediately sees
-  // *what* the click will do.  Renames need a vault note to act on; deletes
-  // and dismisses always work.
   let label: string;
   let title: string;
   let bg: string;
   let disabled = busy || done;
 
+  const p = PRIORITY[entry.type];
+
   if (done) {
     label = t({ en: '✓ done', zh: '✓ 已应用' });
     title = t({ en: 'Already applied', zh: '已经应用' });
     bg = '#16a34a';
+  } else if (entry.type === 'added') {
+    label = busy ? t({ en: '…', zh: '…' }) : t({ en: 'Scan & create', zh: '扫描并创建' });
+    title = t({
+      en: 'Run a single-asset framework scan and write a fresh skeleton .md',
+      zh: '对该资产跑一次单节点框架扫描，并写入骨架 .md',
+    });
+    bg = busy ? '#94a3b8' : p.color;
+  } else if (entry.type === 'updated') {
+    label = busy ? t({ en: '…', zh: '…' }) : t({ en: 'Re-scan', zh: '重新扫描' });
+    title = t({
+      en: 'Re-fingerprint the asset and overwrite the skeleton .md (preserves NOTES)',
+      zh: '重新提取该资产的 AST 指纹并覆盖骨架 .md（保留 NOTES 段）',
+    });
+    bg = busy ? '#94a3b8' : p.color;
   } else if (entry.type === 'renamed') {
     label = busy ? t({ en: '…', zh: '…' }) : t({ en: 'Apply rename', zh: '应用重命名' });
     title = t({
       en: 'Rename the .md to match the new asset name and update its frontmatter (preserves NOTES)',
       zh: '把 .md 改名为新资产名并更新 frontmatter（保留 NOTES 段）',
     });
-    bg = busy ? '#94a3b8' : '#dc2626';
+    bg = busy ? '#94a3b8' : p.color;
     if (!navigable) disabled = true;
-  } else if (entry.type === 'removed') {
-    label = busy
-      ? t({ en: '…', zh: '…' })
-      : navigable
-        ? t({ en: 'Delete .md', zh: '删除 .md' })
-        : t({ en: 'Dismiss', zh: '忽略' });
+  } else {
+    // removed
+    label = busy ? t({ en: '…', zh: '…' }) : navigable ? t({ en: 'Delete .md', zh: '删除 .md' }) : t({ en: 'Dismiss', zh: '忽略' });
     title = navigable
       ? t({ en: 'Asset is gone — also remove its vault .md file', zh: '资产已删除 — 同步删除对应 .md 文件' })
       : t({ en: 'No vault note to delete; remove the badge', zh: '没有对应笔记可删；仅清除徽标' });
-    bg = busy ? '#94a3b8' : navigable ? '#7f1d1d' : '#475569';
-  } else {
-    // added / updated — primary action is dismiss.  User runs Framework
-    // scan from Settings to mint / refresh the .md.
-    label = t({ en: 'Dismiss', zh: '忽略' });
-    title = t({
-      en: entry.type === 'added'
-        ? 'New asset — dismiss this badge, then run "Scan project structure" in Settings to create its skeleton .md'
-        : 'Asset re-saved — dismiss this badge, then run "Scan project structure" or per-node Deep reasoning to refresh',
-      zh: entry.type === 'added'
-        ? '新资产 — 先忽略此徽标，到设置中运行"扫描项目结构"以生成骨架 .md'
-        : '资产已重新保存 — 先忽略此徽标，到设置中运行"扫描项目结构"或节点级 Deep reasoning 刷新',
-    });
-    bg = '#475569';
+    bg = busy ? '#94a3b8' : navigable ? p.color : '#475569';
   }
 
   return (
     <button
-      onClick={() => { void onApply(); }}
+      onClick={onApply}
       disabled={disabled}
       style={{
         padding: '4px 10px',
@@ -607,52 +568,155 @@ const ApplyButton: React.FC<{
   );
 };
 
-const Chip: React.FC<{ color: { bg: string; fg: string }; label: string }> = ({ color, label }) => (
-  <span
-    style={{
-      display: 'inline-block',
-      padding: '3px 9px',
-      borderRadius: 10,
-      fontSize: 'var(--fs-xs)',
-      fontWeight: 700,
-      background: color.bg,
-      color: color.fg,
-      whiteSpace: 'nowrap',
-    }}
-  >
-    {label}
-  </span>
-);
+// ---- Apply-all confirm modal --------------------------------------------
+const ApplyAllConfirmModal: React.FC<{
+  tally: ReturnType<typeof tallyStale>;
+  autoLlm: boolean;
+  setAutoLlm: (v: boolean) => void;
+  onCancel: () => void;
+  onConfirm: (withLlm: boolean) => void;
+  t: ReturnType<typeof useT>;
+}> = ({ tally, autoLlm, setAutoLlm, onCancel, onConfirm, t }) => {
+  const llmReady = isLlmAnalysisAvailable();
+  const ops = tally.added + tally.updated + tally.renamed + tally.removed;
 
-// Extract a human-readable name from a UE asset path: turn
-// "/Game/Path/BP_Foo.BP_Foo" into "BP_Foo".
+  const Row: React.FC<{ type: StaleEventType; count: number; verb: { en: string; zh: string } }> = ({ type, count, verb }) => {
+    if (count === 0) return null;
+    const p = PRIORITY[type];
+    return (
+      <li style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 0' }}>
+        <span style={{ width: 12, height: 12, borderRadius: 6, background: p.color, flexShrink: 0 }} />
+        <span style={{ minWidth: 90, fontWeight: 700 }}>{count} × {t(p.label)}</span>
+        <span style={{ color: 'var(--color-text-muted, #666)' }}>→ {t(verb)}</span>
+      </li>
+    );
+  };
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 2000,
+        background: 'rgba(0,0,0,0.45)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          minWidth: 460, maxWidth: 560,
+          background: 'var(--color-surface, #fff)',
+          borderRadius: 10,
+          boxShadow: '0 18px 50px rgba(0,0,0,0.35)',
+          padding: 22,
+        }}
+      >
+        <div style={{ fontSize: 'var(--fs-md, 16px)', fontWeight: 700, marginBottom: 6 }}>
+          {t({ en: `Apply ${ops} change(s)?`, zh: `即将应用 ${ops} 项变更` })}
+        </div>
+        <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--color-text-muted, #666)', marginBottom: 12 }}>
+          {t({
+            en: 'Changes will be applied in priority order. NOTES sections are preserved across renames and re-scans.',
+            zh: '将按优先级顺序应用。NOTES 段在重命名和重新扫描中均保留。',
+          })}
+        </div>
+        <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 16px 0' }}>
+          <Row type="added" count={tally.added} verb={{ en: 'scan + create skeleton .md', zh: '扫描并创建骨架 .md' }} />
+          <Row type="updated" count={tally.updated} verb={{ en: 're-scan + rewrite skeleton', zh: '重新扫描并重写骨架' }} />
+          <Row type="renamed" count={tally.renamed} verb={{ en: 'rename .md + update frontmatter', zh: '重命名 .md 并更新 frontmatter' }} />
+          <Row type="removed" count={tally.removed} verb={{ en: 'delete the .md', zh: '删除对应 .md' }} />
+        </ul>
+
+        <label
+          style={{
+            display: 'flex', alignItems: 'flex-start', gap: 8,
+            padding: 10,
+            background: llmReady ? 'rgba(220,38,38,0.05)' : 'rgba(0,0,0,0.04)',
+            border: '1px solid rgba(0,0,0,0.08)',
+            borderRadius: 6,
+            cursor: llmReady ? 'pointer' : 'not-allowed',
+            opacity: llmReady ? 1 : 0.65,
+          }}
+          title={llmReady
+            ? t({ en: 'Run LLM deep analysis on every added/updated node', zh: '对每个新增/已修改节点运行 LLM 深度分析' })
+            : t({ en: 'RAG + LLM pipeline not yet wired — toggle is preserved for when it lands.', zh: 'RAG + LLM 流水线尚未上线 — 选择已保存，待上线后自动启用。' })}
+        >
+          <input
+            type="checkbox"
+            checked={autoLlm}
+            onChange={(e) => setAutoLlm(e.target.checked)}
+            disabled={!llmReady}
+            style={{ marginTop: 2 }}
+          />
+          <span style={{ fontSize: 'var(--fs-sm)' }}>
+            <span style={{ fontWeight: 600 }}>
+              {t({ en: 'Also run LLM deep analysis', zh: '同时运行 LLM 深度分析' })}
+            </span>
+            <span style={{
+              marginLeft: 8,
+              padding: '1px 6px',
+              borderRadius: 4,
+              fontSize: 'var(--fs-xs)',
+              fontWeight: 700,
+              background: llmReady ? '#16a34a' : '#94a3b8',
+              color: '#fff',
+            }}>
+              {llmReady ? t({ en: 'READY', zh: '可用' }) : t({ en: 'NOT YET', zh: '暂未启用' })}
+            </span>
+            <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--color-text-muted, #666)', marginTop: 2 }}>
+              {t({
+                en: 'Refines the freshly-written .md with intent / risk / interactions.  Requires a configured LLM provider.',
+                zh: '在新写入的 .md 上叠加 intent / risk / 交互分析。需要已配置 LLM provider。',
+              })}
+            </div>
+          </span>
+        </label>
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 18 }}>
+          <button
+            onClick={onCancel}
+            style={{
+              padding: '6px 14px',
+              background: 'transparent',
+              border: '1px solid rgba(0,0,0,0.15)',
+              borderRadius: 6,
+              fontSize: 'var(--fs-sm)',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >{t({ en: 'Cancel', zh: '取消' })}</button>
+          <button
+            onClick={() => onConfirm(autoLlm && llmReady)}
+            style={{
+              padding: '6px 14px',
+              background: '#dc2626',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 6,
+              fontSize: 'var(--fs-sm)',
+              fontWeight: 700,
+              cursor: 'pointer',
+            }}
+          >{t({ en: 'Apply all', zh: '应用全部' })}</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ---- Helpers --------------------------------------------------------------
+
 function assetName(path: string): string {
   const last = path.split('/').pop() ?? path;
   const base = last.split('.')[0] ?? last;
   return base || path;
 }
 
-function typeLabel(type: StaleEntry['type'], t: ReturnType<typeof useT>): string {
-  switch (type) {
-    case 'renamed': return t({ en: 'renamed', zh: '重命名' });
-    case 'removed': return t({ en: 'deleted', zh: '已删除' });
-    case 'added':   return t({ en: 'added',   zh: '新增' });
-    case 'updated': return t({ en: 'updated', zh: '已修改' });
-  }
-}
-
-// Color the type chip distinctly so the user can scan the list and pick
-// the destructive ones (red for delete) at a glance.
-function typeColor(type: StaleEntry['type']): { bg: string; fg: string } {
-  switch (type) {
-    case 'removed': return { bg: '#7f1d1d', fg: '#fff' };
-    case 'renamed': return { bg: '#a16207', fg: '#fff' };
-    case 'added':   return { bg: '#166534', fg: '#fff' };
-    case 'updated': return { bg: '#1e40af', fg: '#fff' };
-  }
-}
-
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
   return '…' + s.slice(s.length - n + 1);
 }
+
+// Re-export so consumers don't need a separate import — keeps TopBar self-
+// contained for refactor friendliness.
+export type { SyncOutcome };

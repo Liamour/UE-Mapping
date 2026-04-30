@@ -141,6 +141,34 @@ export async function runFrameworkScan(
   };
 }
 
+// ---- Single-asset rescan ---------------------------------------------------
+// Used by the stale-sync engine to handle `added` / `updated` events: deep-
+// scan one asset, render its skeleton .md, and write it under its existing
+// path (or the deterministic default if it's brand-new).  NOTES are
+// preserved — same as the bulk path.  Returns the relative_path written.
+
+export async function syncSingleAsset(
+  projectRoot: string,
+  assetPath: string,
+): Promise<{ relativePath: string; entry: BridgeDeepScanResult }> {
+  const entry = await bridgeRequestDeepScan(assetPath);
+
+  // Look up an existing vault note for this asset.  Falls back to the
+  // deterministic Blueprints/<Name>.md when nothing exists (added case).
+  const index = await buildExistingVaultIndex(projectRoot);
+  const existingPath = index.byAsset.get(entry.asset_path);
+  const relPath = existingPath ?? vaultPathFor(entry);
+
+  const existingNotes = await loadExistingNotes(projectRoot, relPath);
+  // For single-asset path we can't dereference cross-asset edges through
+  // the full fingerprint set — pass an empty array so renderSkeletonMd
+  // simply skips edge target name resolution.  The next full framework
+  // scan will refill those links.
+  const md = renderSkeletonMd(entry, [entry], existingNotes);
+  await bridgeWriteVaultFile(projectRoot, relPath, md);
+  return { relativePath: relPath, entry };
+}
+
 // ---- Implementation -------------------------------------------------------
 
 async function fingerprintAll(

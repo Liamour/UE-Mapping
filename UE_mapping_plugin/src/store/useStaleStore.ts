@@ -60,11 +60,22 @@ export const useStaleStore = create<StaleState>((set, get) => ({
     if (events.length === 0 && latestCounter <= s.latestCounter) return {};
 
     const next = new Map(s.staleByPath);
+
+    // UE's AssetRegistry fires TWO events on a rename: OnAssetRenamed (the
+    // primary) and OnAssetRemoved (redirector cleanup of the old path).
+    // The pair shows up in our buffer as two independent records with
+    // different keys (new path vs old path), which used to surface as two
+    // rows in the dropdown — once as "renamed X→Y" and again as "X removed".
+    //
+    // We dedup in BOTH directions:
+    //   (a) renamed arrives:  delete any existing entry keyed by old_path.
+    //       Catches the "removed-then-renamed" event order.
+    //   (b) removed arrives:  if any existing entry is a rename whose
+    //       previousPath matches this removed path, swallow this event —
+    //       it's the redirector cleanup, not a separate user action.
+    //       Catches the "renamed-then-removed" event order.
     for (const ev of events) {
       if (ev.type === 'renamed' && ev.old_path) {
-        // ONE entry per rename, keyed by new path.  If the old path had
-        // its own entry (e.g., an `updated` before this rename), drop it
-        // — the new entry supersedes.
         next.delete(ev.old_path);
         next.set(ev.path, {
           path: ev.path,
@@ -72,13 +83,24 @@ export const useStaleStore = create<StaleState>((set, get) => ({
           previousPath: ev.old_path,
           timestampSec: ev.timestamp_sec,
         });
-      } else {
-        next.set(ev.path, {
-          path: ev.path,
-          type: ev.type,
-          timestampSec: ev.timestamp_sec,
-        });
+        continue;
       }
+      if (ev.type === 'removed') {
+        // Is this the OLD path of a rename we already know about?  Skip.
+        let suppressed = false;
+        for (const e of next.values()) {
+          if (e.type === 'renamed' && e.previousPath === ev.path) {
+            suppressed = true;
+            break;
+          }
+        }
+        if (suppressed) continue;
+      }
+      next.set(ev.path, {
+        path: ev.path,
+        type: ev.type,
+        timestampSec: ev.timestamp_sec,
+      });
     }
     return {
       staleByPath: next,
