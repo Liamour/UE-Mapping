@@ -1,8 +1,8 @@
 # AICartographer 项目交接文档
 
-> 最后更新：2026-04-29（资深 UE5 视角审视完成 → 战略判断 (B)：去 LLM 抽取，留 LLM 叙事）
+> 最后更新：2026-04-30（A1 全链路打通 — Stale Asset Sync 6 项 user-bug fix 验证通过 → merge 回 master）
 > 这份文档把工程状态、架构、未完成任务一次性交给下一个 session。
-> **从下到上读**：§18 是最新（资深 UE5 dev 审视，10 条新功能 roadmap + 战略判断），§17（P0/P1/P2 验证通过 + 进度表），§16（worktree → main），§15（4 项功能 + 重构），§13/§14（中文化 + 互动叙事），§1-§12 是历史交接。**新 session 必读 §18.4（战略判断）+ §18.3（功能优先级表）+ §17.2（已完成功能清单）。**
+> **从下到上读**：§21 是最新（Stale Asset Sync 全链路 — frontend store + sync engine + 4 类事件 listener + 6 项 bug fix），§20（A1 + A2 桥接层），§18（资深 UE5 dev 审视 + 10 条 roadmap + 战略判断），§17（P0/P1/P2 验证 + 进度表），§16（worktree → main），§15（4 项功能 + 重构），§13/§14（中文化 + 互动叙事），§1-§12 是历史交接。**新 session 必读 §21.4（已知限制） + §21.5（下次起点） + §20.4 P2 / P3（A2/A3 仍 pending）。**
 
 ---
 
@@ -1451,4 +1451,124 @@ fec94c3 feat(export): one-click vault JSON export with browser download
 ```
 
 7 个 commit 一气呵成：3 段 §15 features（P0/P1/P2）+ README + HANDOFF §15-§19 + A1 + A2。
+
+---
+
+## 21. Session 2026-04-30 — Stale Asset Sync 全链路打通（§20.4 P1 + 4 类事件 + UX + 6 项 bug fix）
+
+> 跨 session 工作量很大：A1 前端集成（§20.4 P1 落地） → 全 4 类 AssetRegistry 事件接管 → 优先级驱动 sync engine → Apply UX 三个版本迭代 → 6 项 user-reported bug fix。从 commit `165e58a` 到 `25824f3` 共 8 个 commit，全部在 worktree `claude/hardcore-elbakyan-17ceb7` 上完成，最后 merge 回 master。**已用户验证完毕。**
+
+### 21.1 落地范围（按 commit 时序）
+
+#### A1 前端集成（commit `165e58a` — feat(stale): A1 frontend — 30s polling + per-asset stale UI）
+
+兑现 §20.4 P1 全部内容：
+
+- `services/staleSync.ts` — 单飞 polling 控制器：`POLL_INTERVAL_MS=30_000`，`pollOnce()` 用 `inFlight` flag 防重入，`isStaleListenerAvailable()` 假时静默跳过（HTTP-only / pre-rebuild plugin 不报错）
+- `store/useStaleStore.ts` — Zustand store：`staleByPath: Map<string, StaleEntry>`（用 Map 不用 Set 是因为 dropdown UI 要展示 metadata），`latestCounter: number` 追踪 cursor，`isStale(path)` **双向查**（asset 路径或 rename 的旧路径都标 stale，让 vault 里的 .md 在 UE 端 rename 后还能高亮）
+- `components/shell/TopBar.tsx` — 红点 + 数字徽章 + 下拉详情列表
+- `App.tsx` 顶层 `startStaleSync()`，AppShell unmount 时清理
+
+**MVP 决策**：尚未做持久化（关 UE 重开就丢），尚未对 4 类事件全 hook —— 留给后续 commit。
+
+#### Edge cleanup — empty-target edge filter（commit `780c954`）
+
+后端拒收 `target=""` 的 edge；改在前端 scanPayload 拼装阶段就丢掉，避免 422。
+
+#### Stale UI 加强 — 颜色 pill + 类型标识 + 时间戳（commit `06c1b93`）
+
+dropdown 从「列出 N 个 stale 资产」升级为「逐行展示发生了什么」：每行显示资产名 + 类型 pill（renamed/removed/added/updated）+ 相对时间。
+
+#### Apply rename 一键流（commit `eb84bf2`）
+
+第一次让用户能在 UI 里就把 vault 改名同步：
+
+- `vaultApi.applyVaultRename(projectRoot, oldRel, newName, newAssetPath)` — bridge 优先，bridge 不可用降级 HTTP；移动 .md 文件 + 重写 frontmatter 的 `asset_path` / `asset_name` / `title`
+- TopBar dropdown 行：`"BP_Old → BP_New"` 显示 + 行内 `Apply` 按钮
+- 点击 Apply 后 `useStaleStore.removeRename(currentPath, previousPath)` 清掉两端 entry
+
+#### Per-event Apply — rename / delete / dismiss（commit `fd6717d`）
+
+把 Apply 扩到全 4 类事件：
+
+- `removed` → `deleteVaultFile(projectRoot, rel)`（bridge 端用 C++ 新增的 `DeleteVaultFile` UFUNCTION，缺则 HTTP 降级；如果根本找不到对应 .md，仅 `dismiss`）
+- `dismiss` 按钮 → 纯 store 操作，不触底层 FS
+- 保留用户 vault 布局：rename 不强制改路径，仅在原路径基础上换文件名
+
+#### Priority Sync Engine + Auto-sync + LLM hook（commit `d009116`）
+
+把零散的 per-row apply 收成一个引擎：
+
+- `services/syncEngine.ts` — 单一权威来源，导出 `applyOne` / `applyAll` / `maybeAutoApply` / `tallyStale`
+- `store/useSyncSettingsStore.ts` — 持久化用户偏好：`autoSyncEnabled`、`autoSyncCategories`（4 类事件单独开关）、`autoLlmAfterSync`、`confirmBeforeApplyAll`
+- 优先级：P0 added → P1 updated → P2 renamed → P3 removed（`compareByPriority`）
+- 自动 sync：staleSync.ts 在 poll 后 `maybeAutoApply` 按类别 filter 应用
+- LLM 钩子：`runLlmAnalysisForAsset` 当前为 stub（`isLlmAnalysisAvailable()` 返回 false），等 backend `/api/v1/scan/single` 接通后才会真跑
+
+#### C++ Bridge — OnAssetAdded + OnAssetUpdatedOnDisk（commit `a2d3786`）
+
+补齐 §20.1 当时 MVP 收口的两个事件：
+
+- `AICartographerBridge.cpp::EnsureAssetRegistryListenersRegistered`：4 个 AssetRegistry 委托全注册（Renamed / Removed / Added / UpdatedOnDisk）+ 各自的 `HandleAsset*` 函数体把 `FStaleEvent` push 进 ring buffer
+- `AICartographerBridge.h`：`FDelegateHandle` 字段补齐
+- 4 个 handler 都加了 `UE_LOG(LogTemp, Log, TEXT("[BRIDGE/Stale] ..."))` 诊断行，方便排查 "save 了为啥前端没看到"
+- ⚠️ **OnAssetUpdatedOnDisk 限制**：UE 只在 `Ctrl+S` 后触发；in-graph 节点连线变动如果不存盘，AssetRegistry 永远不会 fire，前端也就检测不到。这是 UE5.7 的硬限制，不是 bug
+
+#### 6 项 user-reported bug fix（commit `25824f3` — fix(stale): rescue mis-fired renames + persist across UE restart + cache invalidation）
+
+用户实测后的 6 个反馈，一个 commit 全部修完：
+
+| # | 反馈 | 根因 | 修复 |
+| --- | --- | --- | --- |
+| 1 | BP_Village → BP_Villag 显示成 removed + added 两行 | UE 在某些 rename flow（drag-drop / save-as / cross-plugin move）只 fire `OnAssetAdded` + `OnAssetRemoved`，不 fire `OnAssetRenamed` | `useStaleStore.applyEvents` 末尾跑 `inferRenamesByDir`：按 parentDir 分桶，桶内 removed/added 用 `commonPrefixSimilarity ≥ 0.5` 贪心配对，配对成功后合成一条 `renamed`，并标记 `inferred: true` |
+| 2 | per-row added/updated 按钮不询问 LLM | TopBar 的 modal 只服务 Apply-all | `ApplyConfirmModal` 加 `mode: 'all' \| 'single'`，per-row 点击时传 `mode='single'` + 当前 entry，让单行也能勾选 LLM |
+| 3 | 上方颜色图例冗余 | pill 自带说明 | 移除 TopBar 里整个 `TypeLegend` 组件 |
+| 4 | 关 UE 重开丢失 stale 列表 | Zustand store 不 persist | 加 `persist` middleware + 自定义 `staleStorage`（Map 序列化要走 `__type: 'StaleMap'` envelope，否则 JSON.stringify 直接 `{}` 吃掉），key=`aicartographer.stale.v1`，partialize 只保留 `staleByPath` + `latestCounter`；新增 `resyncCounter(newCounter)` 处理 UE 重启（latest_counter 回 0）—— 保留 staleByPath 但重置 cursor |
+| 5 | 删除函数后 .md 里函数还在 | `useVaultStore.fileCache` 没 invalidate，Lv2 还读旧 frontmatter | `syncEngine.applyOne` 收集所有 `touchedRels`（rename 的 old/new、delete 的 rel、added/updated 的 rel），结束时统一 `useVaultStore.invalidateFile(rel)` |
+| 6 | 改函数内部节点连线不触发 stale | OnAssetUpdatedOnDisk 只在 Ctrl+S 后 fire | **不是 bug，是 UE 限制**；加 UE_LOG 让用户在 Output Log 验证 save 是否真到了 plugin |
+
+后两个修复（5 + 6）顺带在 `applyOne` 里加了 **post-rename rescan**：rename 完成后再跑一次 `syncSingleAsset(projectRoot, entry.path)`，理由是 heuristic-paired 的 add+remove 可能内容完全不同（比如用户先删了 BP_Old 再新建 BP_New 但只是凑巧同名前缀），强制重新 fingerprint 才能让 .md 拿到正确 AST；非 heuristic 的真 rename 重扫成本也很低，顺手做了。
+
+### 21.2 用户必须做的事
+
+- **重新 build C++ AICartographer 模块** —— commit `a2d3786` 加了 4 个 listener handler 函数体 + UE_LOG 诊断行，commit `fd6717d` 加了 `DeleteVaultFile` UFUNCTION（A1 时未声明）。Live Coding 不能注册新 UFUNCTION，必须关 UE → IDE Build → 重启
+- **构建产物已就位**：`Plugins/AICartographer/Resources/WebUI/index.html` 是 vite 单文件 build 输出，commit `25824f3` 已包含最新
+
+### 21.3 验证状态
+
+✅ 用户已在真实 UE 工程（含 BP_Village / BP_Player / BP_PC 等多处 rename + remove 测试）逐项验证 6 项 fix 通过，明确反馈"验证完毕"并要求 merge 回 master。
+
+### 21.4 已知限制 / Tech debt
+
+- **Heuristic rename 阈值 0.5 是经验值** — 如果用户改名跨度太大（BP_Village → MyVillage），prefix 相似度会低于阈值，pairing 失败，回退到分别 added + removed 两行；用户可手动 dismiss 一边再 apply 另一边
+- **OnAssetUpdatedOnDisk 不监听 in-graph edits** — UE5.7 AssetRegistry 硬限制；想检测节点级变动只能靠后续 deepscan diff（B 阶段或 A3 之后再说）
+- **vault lookup 靠 title** — `syncEngine.lookupRel` 当前用 `assetName(path)` 在 `useVaultStore.files` 里 find by title；如果用户在 vault 里手动改过 .md 标题，rename apply 会找不到 .md。**后续应改为按 frontmatter.asset_path 查**，更可靠
+- **DeleteVaultFile bridge endpoint 当前没有 path-traversal 兜底测试** — 后端 HTTP 端有 `_resolve_safe_path` 守卫，bridge 端依赖 C++ `IsPathInsideRoot`；建议下次 session 加单元测试
+
+### 21.5 下次 session 起点
+
+按优先级（不变，§20.4 的 P2/P3/P4 都还在）：
+
+1. **P2 — A2 业务集成**（§20.4 P2 原文未动）：让前端 batch scan 时顺便调 `bridgeGetReflectionAssetSummary` 把 properties + flag-rich exports 塞进 `ast_data`，backend `analyze_one_node` 三阶段化，把 Reflection 数据持久化到 vault frontmatter
+2. **B — narrative prompt 重写**：与 P2 同期做，prompt 已经知道结构后专心写 INTENT / EXECUTION / INTERACTIONS。预算不限 → 双轮 critique / 更长 context / 更贵模型
+3. **P3 — A3 第 5 级视图**：等 P2 落定后开工
+4. **P4 — Stale 持久化扩展**：当前用 localStorage persist 是「同一台机器同一个 chrome user 下保留」级别；如果团队希望跨机器同步 stale 状态，需写回 vault frontmatter（`mark_node_stale` 函数）。当前优先级低，因为 stale 本来就是 UE-instance-local 概念
+5. **观察项**：让用户在真实工作流跑一段时间（一两周），收集 false positive 率，调整 `RENAME_PAIR_SIM_THRESHOLD` 或加深度限制
+
+### 21.6 commit 记录（this session）
+
+```
+25824f3 fix(stale): rescue mis-fired renames + persist across UE restart + cache invalidation
+a2d3786 feat(bridge): add OnAssetAdded + OnAssetUpdatedOnDisk listeners
+d009116 feat(sync): priority-driven sync engine + auto-sync + LLM analysis hook
+fd6717d feat(stale): per-event apply (rename/delete/dismiss) + preserve user vault layout
+eb84bf2 feat(stale): one-click apply rename + X→Y display + working navigation
+06c1b93 feat(stale): louder UI + dropdown listing which assets changed
+780c954 fix(scan): drop empty-target edges before backend POST
+165e58a feat(stale): A1 frontend — 30s polling + per-asset stale UI
+```
+
+8 个 commit。`165e58a → 06c1b93 → eb84bf2 → fd6717d` 是 UI 三连迭代（红点 → 类型化 dropdown → rename apply → 全 4 类 apply），`d009116` 抽出 sync engine 并加自动化，`a2d3786` 把 C++ 端补全到 4 个 listener，`25824f3` 收尾 6 项实测 bug fix。中间 `780c954` 是路上撞到的小坑顺手修。
+
+最后这次 commit（HANDOFF §21）+ merge 回 master 是 session 收尾。
 
