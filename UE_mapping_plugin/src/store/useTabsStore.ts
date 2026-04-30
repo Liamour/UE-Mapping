@@ -5,12 +5,15 @@ import { create } from 'zustand';
 //   lv1 = System view (force graph of all nodes within a system tag)
 //   lv2 = Blueprint focus (single vault file)
 //   lv3 = Function flow (single function within a BP — on-demand scan)
-export type LevelKind = 'lv0' | 'lv1' | 'lv2' | 'lv3';
+//   lv4 = Cross-BP call trace (concentric BFS view from a root BP — A3,
+//         HANDOFF §19.3 / §21.5; rendered by Lv4CallTrace, scoped via
+//         relativePath of the root vault note)
+export type LevelKind = 'lv0' | 'lv1' | 'lv2' | 'lv3' | 'lv4';
 
 export interface TabLocation {
   level: LevelKind;
   systemId?: string;          // for lv1 — system axis value, e.g. "combat"
-  relativePath?: string;      // for lv2 — vault file path
+  relativePath?: string;      // for lv2 / lv3 / lv4 — vault file path of the focused/root BP
   functionId?: string;        // for lv3 — function name within a BP
 }
 

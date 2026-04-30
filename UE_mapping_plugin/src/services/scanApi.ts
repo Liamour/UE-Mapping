@@ -258,6 +258,93 @@ export async function postTestConnection(config: ProviderConfigPayload): Promise
   return (await r.json()) as TestConnectionResponse;
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Cross-BP call trace (A3 — HANDOFF §19.3 + §21.5).  Drives the Lv4 view.
+// Backend walks the vault, BFSes outbound edges from a root asset_path, and
+// returns nodes (with their BFS layer_distance) + edges suitable for a
+// concentric-ring force layout.  Bounded by max_depth + max_nodes so a hub
+// BP can't explode the request — the response carries a `truncated` flag
+// the UI surfaces honestly when limits cut the frontier short.
+// ─────────────────────────────────────────────────────────────────────────
+
+export type CallTraceEdgeType =
+  | 'function_call'
+  | 'interface_call'
+  | 'cast'
+  | 'spawn'
+  | 'listens_to'
+  | 'inheritance'
+  | 'delegate'
+  | string;            // forward-compat: backend may add new types
+
+export interface CallTraceNode {
+  asset_path: string;
+  title: string;
+  layer: number;       // BFS distance from root (root = 0)
+  node_type: string;
+  intent?: string | null;
+  risk_level?: string;
+  // Set when the BFS hit an asset that's referenced by an edge but doesn't
+  // have its own .md in the vault yet (race against a partial scan).  The
+  // UI renders these as ghost nodes so the call chain still reads.
+  missing?: boolean;
+}
+
+export interface CallTraceEdge {
+  source: string;       // asset_path
+  target: string;       // asset_path
+  edge_type: CallTraceEdgeType;
+  refs: string[];       // human-readable call-site labels
+}
+
+export interface CallTraceResponse {
+  root: string;
+  max_depth: number;
+  max_nodes: number;
+  edge_types: CallTraceEdgeType[] | null;
+  nodes: CallTraceNode[];
+  edges: CallTraceEdge[];
+  truncated: boolean;
+}
+
+export interface CallTraceQuery {
+  projectRoot: string;
+  rootAssetPath: string;
+  maxDepth?: number;
+  maxNodes?: number;
+  edgeTypes?: CallTraceEdgeType[];   // omit / empty = all types
+}
+
+export async function getCallTrace(q: CallTraceQuery): Promise<CallTraceResponse> {
+  const params = new URLSearchParams({
+    project_root: q.projectRoot,
+    root_asset_path: q.rootAssetPath,
+  });
+  if (q.maxDepth !== undefined) params.set('max_depth', String(q.maxDepth));
+  if (q.maxNodes !== undefined) params.set('max_nodes', String(q.maxNodes));
+  if (q.edgeTypes && q.edgeTypes.length > 0) {
+    params.set('edge_types', q.edgeTypes.join(','));
+  }
+
+  let r: Response;
+  try {
+    r = await fetch(`${API_BASE}/api/v1/calltrace?${params.toString()}`);
+  } catch {
+    throw new BackendUnreachableError(
+      `Cannot reach backend at ${API_BASE} — start uvicorn first.`,
+    );
+  }
+  if (r.status === 404) {
+    const detail = await safeReadDetail(r);
+    throw new Error(detail ?? 'No vault note found for the requested asset.');
+  }
+  if (!r.ok) {
+    const detail = await safeReadDetail(r);
+    throw new Error(`calltrace HTTP ${r.status}${detail ? `: ${detail}` : ''}`);
+  }
+  return (await r.json()) as CallTraceResponse;
+}
+
 async function safeReadDetail(r: Response): Promise<string | undefined> {
   try {
     const j = await r.json();

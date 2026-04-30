@@ -25,6 +25,9 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
   const files = useVaultStore((s) => s.files);
   const fileCache = useVaultStore((s) => s.fileCache);
   const navigate = useTabsStore((s) => s.navigateActive);
+  const activeSystemId = useTabsStore(
+    (s) => s.tabs.find((t) => t.id === s.activeId)?.location.systemId,
+  );
   const setSettingsOpen = useUIStore((s) => s.setSettingsOpen);
   const getProviderConfig = useLLMStore((s) => s.getProviderConfig);
   const llmProvider = useLLMStore((s) => s.provider);
@@ -238,6 +241,29 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
                 })}
               >
                 {t({ en: '↗ Open in UE', zh: '↗ 在 UE 中打开' })}
+              </button>
+            )}
+            {/*
+              Lv4 entry — concentric BFS view of who-this-BP-calls (max
+              depth 3, max 100 nodes by default).  Hidden when there are
+              no outbound edges in frontmatter, since an empty trace
+              would just show a lonely root.  Reads from the existing
+              backend /api/v1/calltrace endpoint (HTTP only — no bridge
+              dependency).
+            */}
+            {Object.keys((fm.edges as Record<string, unknown> | undefined) ?? {}).length > 0 && (
+              <button
+                className="btn-text"
+                onClick={() => navigate(
+                  { level: 'lv4', relativePath, systemId: activeSystemId },
+                  t({ en: 'Call trace', zh: '调用链' }),
+                )}
+                title={t({
+                  en: 'Open the cross-blueprint call trace from this BP (concentric BFS, depth ≤ 3)',
+                  zh: '从此蓝图打开跨蓝图调用链（同心环 BFS，深度 ≤ 3）',
+                })}
+              >
+                {t({ en: '⊙ Call trace', zh: '⊙ 调用链' })}
               </button>
             )}
           </div>

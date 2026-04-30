@@ -18,6 +18,7 @@ import { Lv1SystemMarkdown } from '../levels/Lv1SystemMarkdown';
 import { Lv2BlueprintFocus } from '../levels/Lv2BlueprintFocus';
 import { Lv2BlueprintGraph } from '../levels/Lv2BlueprintGraph';
 import { Lv3FunctionFlow } from '../levels/Lv3FunctionFlow';
+import { Lv4CallTrace } from '../levels/Lv4CallTrace';
 import type { ViewMode } from '../../store/useUIStore';
 
 export const AppShell: React.FC = () => {
@@ -96,6 +97,9 @@ function renderLevel(
     case 'lv3':
       if (!loc.relativePath || !loc.functionId) return <Lv0CardWall />;
       return <Lv3FunctionFlow relativePath={loc.relativePath} functionId={loc.functionId} />;
+    case 'lv4':
+      if (!loc.relativePath) return <Lv0CardWall />;
+      return <Lv4CallTrace relativePath={loc.relativePath} />;
     default: return <Lv0CardWall />;
   }
 }

@@ -51,6 +51,14 @@ function locationToSegments(
     });
   }
   if (loc.level === 'lv2') return out;
+  // Lv3 (function flow) and Lv4 (call trace) both branch off lv2 with the
+  // same `relativePath` root.  Lv3 carries `functionId`; Lv4 just adds a
+  // "call trace" leaf so the breadcrumb reads "Project › combat ›
+  // BP_Player › call trace".
+  if (loc.level === 'lv4') {
+    out.push({ label: lang === 'zh' ? '调用链' : 'call trace' });
+    return out;
+  }
   if (loc.functionId) {
     out.push({ label: loc.functionId });
   }

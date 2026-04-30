@@ -1415,6 +1415,191 @@ async def vault_export(project_root: str, scope: str = "all"):
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Cross-BP call-trace (A3, HANDOFF §19.3 + §21.5) — concentric BFS view.
+# ─────────────────────────────────────────────────────────────────────────────
+# Walks the vault's frontmatter `edges:` blocks BFS-style from a root asset,
+# returning nodes (with their BFS layer_distance) and edges suitable for the
+# Lv4 CallTrace concentric layout.  Edge `target` values in frontmatter are
+# resolved titles (not asset_paths), so we build a title → asset_path index
+# from the vault first and translate during traversal.
+#
+# Bounded by max_depth (default 3) and max_nodes (default 100) — these match
+# §19.3's MVP guardrails so a hub BP can't blow up the graph.  Returns a
+# `truncated` flag when we hit max_nodes with the BFS frontier still non-empty
+# so the UI can surface "+N nodes elided" honestly.
+
+DEFAULT_CALLTRACE_DEPTH = 3
+DEFAULT_CALLTRACE_NODES = 100
+ALLOWED_EDGE_TYPES = {
+    "function_call", "interface_call", "cast", "spawn", "listens_to",
+    "inheritance", "delegate",
+}
+
+
+def _build_calltrace_index(project_root: str) -> Dict[str, Any]:
+    """Walks vault/*.md once, returns:
+      asset_to_record:  asset_path → {title, relative_path, node_type, intent,
+                                      risk_level, edges (nested), refs_in_per_type}
+      title_to_asset:   resolved-target-name → asset_path
+
+    Edges in frontmatter are stored under nested `edges:` blocks with
+    `target = <title>` (not asset_path).  We keep edges as-is; the BFS resolves
+    them via title_to_asset on the way out.  Self-edges and edges with no
+    matching target asset are simply skipped — they're cross-engine references
+    or stale entries from before a rename.
+    """
+    root = vault_writer.vault_root(project_root)
+    asset_to_record: Dict[str, Dict[str, Any]] = {}
+    title_to_asset: Dict[str, str] = {}
+    if not root.exists():
+        return {"asset_to_record": asset_to_record, "title_to_asset": title_to_asset}
+
+    for path in root.rglob("*.md"):
+        if path.name.startswith("_"):
+            continue
+        # Skip Systems aggregate pages — they describe a system, not a
+        # call-graph node, and their `edges` block (if any) is L1-derived.
+        if path.parent.name == "Systems":
+            continue
+        fm = vault_writer.read_existing_frontmatter(path)
+        if not fm or not isinstance(fm, dict):
+            continue
+        asset_path = fm.get("asset_path")
+        if not isinstance(asset_path, str) or not asset_path:
+            continue
+
+        title = path.stem
+        record = {
+            "title": title,
+            "relative_path": str(path.relative_to(root)).replace("\\", "/"),
+            "asset_path": asset_path,
+            "node_type": fm.get("type") or fm.get("node_type") or "Blueprint",
+            "intent": fm.get("intent"),
+            "risk_level": fm.get("risk_level") or "nominal",
+            "edges": fm.get("edges") if isinstance(fm.get("edges"), dict) else {},
+        }
+        asset_to_record[asset_path] = record
+        title_to_asset[title] = asset_path
+
+    return {"asset_to_record": asset_to_record, "title_to_asset": title_to_asset}
+
+
+@app.get("/api/v1/calltrace")
+async def vault_calltrace(
+    project_root: str,
+    root_asset_path: str,
+    max_depth: int = DEFAULT_CALLTRACE_DEPTH,
+    max_nodes: int = DEFAULT_CALLTRACE_NODES,
+    edge_types: Optional[str] = None,
+):
+    if not project_root:
+        raise HTTPException(status_code=400, detail="project_root is required")
+    if not root_asset_path:
+        raise HTTPException(status_code=400, detail="root_asset_path is required")
+
+    # Sanitise depth / nodes — accept any positive int but clamp to sane upper
+    # bounds so a malformed query string can't make the BFS run away.
+    max_depth = max(0, min(int(max_depth), 8))
+    max_nodes = max(1, min(int(max_nodes), 500))
+
+    requested_types: Optional[set[str]] = None
+    if edge_types:
+        wanted = {t.strip() for t in edge_types.split(",") if t.strip()}
+        # Silently drop unknown edge types rather than 400 — keeps the URL
+        # forgiving when the client URL-encodes an unfamiliar type.
+        requested_types = wanted & ALLOWED_EDGE_TYPES
+        if not requested_types:
+            requested_types = None  # treat empty filter as "all types"
+
+    index = _build_calltrace_index(project_root)
+    asset_to_record = index["asset_to_record"]
+    title_to_asset = index["title_to_asset"]
+
+    if root_asset_path not in asset_to_record:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No vault note found with asset_path={root_asset_path}. "
+                   f"Run a project scan first.",
+        )
+
+    nodes_out: List[Dict[str, Any]] = []
+    edges_out: List[Dict[str, Any]] = []
+    visited: Dict[str, int] = {root_asset_path: 0}
+    queue: List[tuple[str, int]] = [(root_asset_path, 0)]
+    truncated = False
+
+    while queue and len(nodes_out) < max_nodes:
+        cur, depth = queue.pop(0)
+        rec = asset_to_record.get(cur)
+        if not rec:
+            # Edge endpoint that resolved to a vault title but has no record
+            # (race against a vault edit) — emit as a stub so the UI can still
+            # plot it without dangling references.
+            nodes_out.append({
+                "asset_path": cur,
+                "title": cur.rsplit("/", 1)[-1].split(".")[0] if "/" in cur else cur,
+                "layer": depth,
+                "node_type": "Blueprint",
+                "intent": None,
+                "risk_level": "nominal",
+                "missing": True,
+            })
+            continue
+        nodes_out.append({
+            "asset_path": cur,
+            "title": rec["title"],
+            "layer": depth,
+            "node_type": rec["node_type"],
+            "intent": rec.get("intent"),
+            "risk_level": rec.get("risk_level") or "nominal",
+        })
+        if depth >= max_depth:
+            continue
+
+        for edge_type, entries in (rec["edges"] or {}).items():
+            if not isinstance(entries, list):
+                continue
+            if requested_types and edge_type not in requested_types:
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                target_title = entry.get("target")
+                if not isinstance(target_title, str) or not target_title:
+                    continue
+                target_asset = title_to_asset.get(target_title)
+                if not target_asset:
+                    # Target not in vault (engine class, stale rename) — skip.
+                    continue
+                refs = entry.get("refs") or []
+                edges_out.append({
+                    "source": cur,
+                    "target": target_asset,
+                    "edge_type": edge_type,
+                    "refs": [str(r) for r in refs] if isinstance(refs, list) else [],
+                })
+                if target_asset not in visited:
+                    visited[target_asset] = depth + 1
+                    if len(nodes_out) + len(queue) < max_nodes:
+                        queue.append((target_asset, depth + 1))
+                    else:
+                        truncated = True
+
+    if queue:
+        truncated = True
+
+    return {
+        "root": root_asset_path,
+        "max_depth": max_depth,
+        "max_nodes": max_nodes,
+        "edge_types": sorted(requested_types) if requested_types else None,
+        "nodes": nodes_out,
+        "edges": edges_out,
+        "truncated": truncated,
+    }
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
