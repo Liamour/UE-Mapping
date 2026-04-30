@@ -19,8 +19,12 @@ export interface ScanStartOptions {
   projectRoot: string;
   providerConfig: ProviderConfigPayload;
   scope: { l2: boolean; l1: boolean };
+  // When set, the L1 stage runs scoped to a single system tag (one LLM
+  // call) instead of batch-over-all-systems.  Used by the Lv1 page button so
+  // a single-system refresh doesn't re-spend tokens on every other system.
+  systemId?: string;
   // Caller hooks — fired once when the scan finishes successfully so the L1
-  // button can navigate to the overview and Settings can refresh the index.
+  // button can navigate and Settings can refresh the index.
   onDone?: (phase: Extract<ProjectScanPhase, { kind: 'done' }>) => void;
 }
 
@@ -50,6 +54,7 @@ export const useScanStore = create<ScanState>((set, get) => ({
       projectRoot: opts.projectRoot,
       providerConfig: opts.providerConfig,
       scope: opts.scope,
+      systemId: opts.systemId,
       signal: abort.signal,
       onPhase: (phase) => set({ phase }),
     });

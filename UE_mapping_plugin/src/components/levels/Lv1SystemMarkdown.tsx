@@ -119,7 +119,7 @@ export const Lv1SystemMarkdown: React.FC<Props> = ({ systemId }) => {
                 : t({ en: 'skeleton', zh: '骨架' })}
             </span>
           </div>
-          <L1ScanButton />
+          <L1ScanButton systemId={systemId} />
         </div>
       </div>
 

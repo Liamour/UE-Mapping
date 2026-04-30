@@ -1,45 +1,56 @@
-// "Run project scan" button surfaced inside the L1 views (both force-graph
-// and markdown modes).  All state lives in useScanStore so the button keeps
-// its progress / running / done indicators across tab switches and component
-// remounts — without that, a user clicking through systems mid-scan would see
-// the button reset to idle and might re-fire the same backend job.
+// Lv1 page button — "Analyze this system" (Phase 2 refactor).
+//
+// Pre-Phase-2 this was "Run project scan" (full L2 batch + project-wide L1
+// clustering).  After the refactor the entry points decouple:
+//   - Settings → "Run LLM analysis"  : batch L2 + batch L1
+//   - Lv1 page button                 : single-system L1 only (this file)
+//   - Lv2 page "Deep reasoning"       : single-BP L2 only
+//
+// This button therefore takes the active `systemId` and runs L1 scoped to it
+// — no L2 step, one LLM call, one Systems/<id>.md updated.  Avoids burning
+// tokens on every other system when the user just wants to refresh one.
+//
+// All scan state lives in useScanStore so progress survives tab switches and
+// remounts (otherwise navigating between systems mid-scan would reset the
+// button to idle and the user could re-fire the same backend job).
+//
+// Disabled when systemId is missing or "_overview" (the synthetic project
+// overview view has no single system to scope to — use Settings for batch).
 
 import React, { useCallback } from 'react';
-import { isDeepScanAvailable } from '../../services/bridgeApi';
-import { type ProjectScanPhase } from '../../services/projectScan';
 import { useVaultStore } from '../../store/useVaultStore';
 import { useLLMStore } from '../../store/useLLMStore';
-import { useTabsStore } from '../../store/useTabsStore';
 import { useScanStore } from '../../store/useScanStore';
+import { type ProjectScanPhase } from '../../services/projectScan';
 import { useT, useLang } from '../../utils/i18n';
 
-export const L1ScanButton: React.FC = () => {
+interface Props {
+  systemId: string;
+}
+
+export const L1ScanButton: React.FC<Props> = ({ systemId }) => {
   const t = useT();
   const lang = useLang();
   const projectRoot = useVaultStore((s) => s.projectRoot);
   const getProviderConfig = useLLMStore((s) => s.getProviderConfig);
   const llmReady = useLLMStore((s) => s.isReady());
   const llmProvider = useLLMStore((s) => s.provider);
-  const navigate = useTabsStore((s) => s.navigateActive);
 
   const phase = useScanStore((s) => s.phase);
   const isRunning = useScanStore((s) => s.isRunning);
   const startScan = useScanStore((s) => s.start);
   const cancelScan = useScanStore((s) => s.cancel);
 
-  // Bridge required for L2 (AST fingerprinting) but NOT for L1 (which reads
-  // vault metadata via the backend HTTP API). When running in the Web UI dev
-  // mode the bridge is absent — degrade to L1-only so the user can still
-  // cluster a vault that already has L2 markdown written.
-  const bridgeAvailable = isDeepScanAvailable();
-  const scope = bridgeAvailable ? { l2: true, l1: true } : { l2: false, l1: true };
-  const canRun = !!projectRoot && llmReady && !isRunning;
+  // Single-system L1 mode: skip L2 entirely (the user already has the per-BP
+  // metadata; this button only refreshes the system-level narrative).
+  const scope = { l2: false, l1: true };
+  const isOverview = systemId === '_overview' || !systemId;
+  const canRun = !!projectRoot && llmReady && !isRunning && !isOverview;
 
   const start = useCallback(async () => {
-    if (!projectRoot) return;
+    if (!projectRoot || isOverview) return;
     const providerConfig = getProviderConfig();
     if (!providerConfig) {
-      // Surface this through the store too so the error persists across remounts.
       useScanStore.setState({
         phase: {
           kind: 'error',
@@ -56,18 +67,12 @@ export const L1ScanButton: React.FC = () => {
       projectRoot,
       providerConfig,
       scope,
-      // Cache invalidation + index reload run inside useScanStore.start before
-      // this hook fires — by the time we navigate, the overview file is fresh.
-      onDone: async (final) => {
-        if (final.l1Status?.status === 'COMPLETED') {
-          navigate(
-            { level: 'lv1', systemId: '_overview' },
-            lang === 'zh' ? '项目总览' : 'Project Overview',
-          );
-        }
-      },
+      systemId,
+      // No post-done navigation — we're already on the system's Lv1 page.
+      // The store's loadIndex + cache invalidation refreshes the view in
+      // place when the new Systems/<id>.md lands.
     });
-  }, [projectRoot, scope, getProviderConfig, llmProvider, navigate, startScan, t, lang]);
+  }, [projectRoot, scope, systemId, isOverview, getProviderConfig, llmProvider, startScan, t]);
 
   const statusLine = renderStatus(phase, lang);
   const errorLine =
@@ -90,21 +95,22 @@ export const L1ScanButton: React.FC = () => {
             ? t({ en: 'Set a project root in Settings first', zh: '请先在设置中配置项目根目录' })
             : !llmReady
             ? t({ en: `Configure ${llmProvider} in Settings first`, zh: `请先在设置中配置 ${llmProvider}` })
+            : isOverview
+            ? t({
+                en: 'Project overview has no single system — use Settings → Run LLM analysis to batch all systems.',
+                zh: '项目总览没有单一系统可分析 — 请在 设置 → 运行 LLM 分析 中批量分析所有系统。',
+              })
             : isRunning
             ? t({ en: 'A scan is already in progress', zh: '已有扫描在进行中' })
-            : bridgeAvailable
-            ? t({ en: 'Run L2 (per-blueprint) and L1 (project clustering) analysis', zh: '运行 L2（单蓝图）和 L1（项目聚类）分析' })
             : t({
-                en: 'Bridge unavailable in Web UI — running L1 clustering only (L2 metadata must already exist in vault)',
-                zh: 'Web UI 中桥接不可用 — 只运行 L1 聚类（vault 中必须已有 L2 元数据）',
+                en: `Re-run L1 analysis for the "${systemId}" system (single LLM call, updates Systems/${systemId}.md).`,
+                zh: `重新运行此系统（"${systemId}"）的 L1 分析（单次 LLM 调用，更新 Systems/${systemId}.md）。`,
               })
         }
       >
         {isRunning
-          ? t({ en: 'Scanning…', zh: '扫描中…' })
-          : bridgeAvailable
-          ? t({ en: 'Run project scan', zh: '运行项目扫描' })
-          : t({ en: 'Run L1 clustering', zh: '运行 L1 聚类' })}
+          ? t({ en: 'Analysing…', zh: '分析中…' })
+          : t({ en: 'Analyse this system', zh: '分析此系统' })}
       </button>
       {isRunning && <button className="btn-text" onClick={cancelScan}>{t({ en: 'Cancel', zh: '取消' })}</button>}
       {statusLine && (
@@ -136,11 +142,14 @@ function renderStatus(phase: ProjectScanPhase, lang: 'en' | 'zh'): string | null
         ? `L2 ${finished}/${s.total_nodes}（完成 ${s.completed_nodes} · 跳过 ${s.skipped_nodes}）`
         : `L2 ${finished}/${s.total_nodes} (${s.completed_nodes} done · ${s.skipped_nodes} skipped)`;
     }
-    case 'l1-submitting': return zh ? '正在提交 L1 聚类…' : 'Submitting L1 clustering…';
+    case 'l1-submitting': return zh ? '正在提交 L1 分析…' : 'Submitting L1 analysis…';
     case 'l1-scanning':
+      // total_nodes = 1 in single-system mode; the per-system worker reports
+      // immediate transitions from PROCESSING → COMPLETED so this phase is
+      // brief.  Keep the message short.
       return zh
-        ? `L1 正在聚类 ${phase.status.total_nodes} 个蓝图（LLM，约 30–90 秒）…`
-        : `L1 clustering ${phase.status.total_nodes} blueprints (LLM, ~30–90s)…`;
+        ? `L1 分析中（约 30–60 秒）…`
+        : `L1 analysing (~30–60s)…`;
     case 'done': {
       const l1ok = phase.l1Status?.status === 'COMPLETED';
       const l2 = phase.l2Status;
@@ -148,11 +157,14 @@ function renderStatus(phase: ProjectScanPhase, lang: 'en' | 'zh'): string | null
         ? (zh
             ? `更新 ${l2.completed_nodes} · 跳过 ${l2.skipped_nodes}`
             : `${l2.completed_nodes} updated · ${l2.skipped_nodes} skipped`)
-        : (zh ? 'vault 已是最新' : 'vault up to date');
+        : null;  // L2 didn't run in single-system mode — don't claim "vault up to date"
       if (l1ok) {
-        return zh ? `完成 · ${l2bits} · L1 总览已写入` : `Done · ${l2bits} · L1 overview written`;
+        return zh ? `完成 · 此系统的 L1 已更新` : `Done · system L1 written`;
       }
-      return zh ? `完成 · ${l2bits}` : `Done · ${l2bits}`;
+      // L1 did NOT complete (failed or cancelled).  l2bits may be null if
+      // L2 was skipped; fall back to a generic "done" message in that case.
+      if (l2bits) return zh ? `完成 · ${l2bits}` : `Done · ${l2bits}`;
+      return zh ? `已结束（L1 未完成）` : `Done (L1 incomplete)`;
     }
     case 'error': return null;
   }

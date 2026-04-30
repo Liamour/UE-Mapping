@@ -208,26 +208,39 @@ export async function postSingleScan(req: SingleScanRequest): Promise<SingleScan
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// L1 (project-level) clustering — runs after a successful L2 batch.  The
-// backend reads existing per-blueprint frontmatter from the vault, so this
-// request only carries project_root + provider_config.  Status reuses the
-// same /scan/status/{task_id} schema as batch (total_nodes = blueprint count
-// the L1 pass examined; a single COMPLETED/FAILED transition once the LLM
-// returns and the overview file is written).
+// L1 (per-system) — Phase 2 refactor.
+//
+// Two flavours from the same endpoint, dispatched by the optional systemId
+// query param:
+//   - systemId === undefined → batch all discovered systems in the vault
+//     (one LLM call per system, sequential).  Settings panel uses this.
+//   - systemId === "<id>"    → analyse just that one system.  The L1 page
+//     button (Lv1SystemGraph / Lv1SystemMarkdown) uses this.
+//
+// Status reuses the /scan/status/{task_id} schema; total_nodes equals the
+// number of systems analysed (1 for single-system, N for batch).  Per-system
+// failure reasons land in node_errors keyed by system_id.
 // ─────────────────────────────────────────────────────────────────────────
 
 export interface L1ScanRequest {
   project_root: string;
   provider_config: ProviderConfigPayload;
+  // Frontend-only field — converted to a `?system_id=...` query string.
+  // Omit / leave undefined to run a batch over every discovered system.
+  systemId?: string;
 }
 
 export async function postL1Scan(req: L1ScanRequest): Promise<ScanBatchResponse> {
+  const { systemId, ...body } = req;
+  const url = systemId
+    ? `${API_BASE}/api/v1/scan/l1?system_id=${encodeURIComponent(systemId)}`
+    : `${API_BASE}/api/v1/scan/l1`;
   let r: Response;
   try {
-    r = await fetch(`${API_BASE}/api/v1/scan/l1`, {
+    r = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req),
+      body: JSON.stringify(body),
     });
   } catch (e) {
     throw new BackendUnreachableError(

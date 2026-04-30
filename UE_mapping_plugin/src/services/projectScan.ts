@@ -69,10 +69,16 @@ export interface ProjectScanOptions {
   scope: { l2: boolean; l1: boolean };
   signal: AbortSignal;
   onPhase: (phase: ProjectScanPhase) => void;
+  // When set, the L1 stage runs in single-system mode (one LLM call scoped
+  // to that system tag) instead of batch-over-all-systems.  The Lv1 page
+  // button passes this through with its current systemId so the user can
+  // refresh just one system without spending tokens on the others.  Has no
+  // effect on the L2 stage — batch L2 either runs (per scope.l2) or doesn't.
+  systemId?: string;
 }
 
 export async function runProjectScan(opts: ProjectScanOptions): Promise<ProjectScanPhase> {
-  const { projectRoot, providerConfig, scope, signal, onPhase } = opts;
+  const { projectRoot, providerConfig, scope, signal, onPhase, systemId } = opts;
   const failures: ScanFailure[] = [];
   let l2Status: ScanStatus | null = null;
   let l1Status: ScanStatus | null = null;
@@ -191,16 +197,24 @@ export async function runProjectScan(opts: ProjectScanOptions): Promise<ProjectS
     }
 
     // ── L1 stage ───────────────────────────────────────────────────────────
+    // Per Phase 2 refactor: backend `/scan/l1` dispatches on `systemId`.
+    // Without it → batch (every discovered system, sequentially).  With it →
+    // single-system.  Either way the polling schema is identical; total_nodes
+    // becomes the system count for the progress bar.
     if (scope.l1) {
       onPhase({ kind: 'l1-submitting' });
       const { task_id } = await postL1Scan({
         project_root: projectRoot,
         provider_config: providerConfig,
+        systemId,    // undefined ⇒ batch all systems
       });
 
       const initialL1: ScanStatus = {
         task_id, status: 'PENDING',
-        total_nodes: 1, completed_nodes: 0, failed_nodes: 0, skipped_nodes: 0,
+        // total_nodes is 0 for batch (set in worker once it discovers
+        // systems) and 1 for single-system; the polling reconciles it.
+        total_nodes: systemId ? 1 : 0,
+        completed_nodes: 0, failed_nodes: 0, skipped_nodes: 0,
         node_statuses: {},
       };
       onPhase({ kind: 'l1-scanning', status: initialL1, failures });
@@ -212,9 +226,20 @@ export async function runProjectScan(opts: ProjectScanOptions): Promise<ProjectS
           onPhase({ kind: 'l1-scanning', status, failures: [...failures] }),
       });
 
-      if (l1Status.status === 'FAILED') {
+      // Surface per-system failures via node_errors (single source of truth
+      // since the diag commit added per-node error persistence).
+      for (const [sid, st] of Object.entries(l1Status.node_statuses ?? {})) {
+        if (st === 'FAILED') {
+          const reason = l1Status.node_errors?.[sid]
+            ?? 'backend marked system FAILED (no error text persisted — check uvicorn console)';
+          failures.push({ asset_path: `<L1: ${sid}>`, reason });
+        }
+      }
+      // Task-level error (provider init / no systems found / etc.) — only
+      // surface when no per-system rows captured a real reason.
+      if (l1Status.status === 'FAILED' && !Object.values(l1Status.node_statuses ?? {}).includes('FAILED')) {
         failures.push({
-          asset_path: '<L1 clustering>',
+          asset_path: '<L1 batch>',
           reason: l1Status.error
             ?? 'backend L1 task FAILED (no error text persisted — check uvicorn console)',
         });

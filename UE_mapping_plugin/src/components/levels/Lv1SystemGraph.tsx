@@ -119,7 +119,7 @@ export const Lv1SystemGraph: React.FC<Props> = ({ systemId }) => {
       <div className="system-graph-header">
         <h2>{formatSystem(systemId)}</h2>
         <span className="muted">{t({ en: `${inSystem.length} nodes`, zh: `${inSystem.length} 个节点` })}</span>
-        <L1ScanButton />
+        <L1ScanButton systemId={systemId} />
         {presentNodeTypes.length > 0 && (
           <div className="edge-legend" title={t({ en: 'Node colors', zh: '节点颜色' })}>
             {presentNodeTypes.map((nt) => (

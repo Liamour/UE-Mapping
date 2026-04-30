@@ -242,6 +242,100 @@ RULES
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
+# L1 (per-system) — analyses ONE system in isolation given its members'
+# already-tagged L2 metadata.  Replaces the old project-wide clustering pass:
+# the L2 prompt now produces system tags directly (controlled vocab), and L1's
+# job becomes "narrate this single system's internal architecture" rather than
+# "decide which BPs cluster together".  Batch L1 = loop this over discovered
+# system tags.  See HANDOFF Phase 2 refactor.
+# ─────────────────────────────────────────────────────────────────────────────
+
+L1_SYSTEM_SCOPED_PROMPT = """You are a senior Unreal Engine 5 systems architect.
+
+You will receive metadata for ONE system in a UE5 project — a set of blueprints
+that share the same `system` tag (e.g. "combat", "input", "ui") assigned by the
+L2 pass. Your job is to narrate THIS system's internal architecture: how its
+members interact at runtime, what external systems it depends on, and what
+risks live within it.
+
+INPUT
+You will receive a JSON object with this shape:
+{
+  "system_id": "combat",
+  "members": [
+    {
+      "node_id": "BP_PlayerCharacter",
+      "asset_path": "/Game/...",
+      "title": "BP_PlayerCharacter",
+      "node_type": "Blueprint",
+      "intent": "<one sentence from L2>",
+      "layer": "gameplay",
+      "role": "actor",
+      "risk_level": "nominal | warning | critical",
+      "outbound_edges": [
+        {"target": "BP_WeaponBase", "edge_type": "spawn", "in_system": true},
+        {"target": "BP_HUDWidget", "edge_type": "function_call", "in_system": false}
+      ]
+    },
+    ...
+  ]
+}
+
+`in_system: true` means the edge target is a member of THIS system; `false`
+means it points outside (likely to another system). Use this distinction to
+separate INTERNAL CALL FLOW from EXTERNAL COUPLING.
+
+OUTPUT — produce TWO sections in this exact order, no preamble:
+
+[METADATA]
+{
+  "system_id": "<input system_id verbatim>",
+  "title": "<2-4 word human-readable title, e.g. 'Combat Loop'>",
+  "intent": "<one sentence describing what runtime problem this system OWNS>",
+  "system_risk_level": "<nominal | warning | critical>",
+  "external_dependencies": [
+    {"target_system": "<other system tag the L2 vocab uses>",
+     "via": "function_call | spawn | listens_to | interface_call | cast",
+     "examples": ["<member name within THIS system that drives the edge>", ...]}
+  ]
+}
+[/METADATA]
+
+[ANALYSIS]
+### [ INTENT ]
+(One sentence: this system's runtime responsibility for the gameplay loop.)
+
+### [ MEMBERS ]
+(For each member, one bullet: `BP_Foo (role)` — one-sentence runtime role
+within THIS system. Reference at most 8 members; if there are more, group the
+trailing ones as "...plus N similar role-X helpers".)
+
+### [ INTERNAL CALL FLOW ]
+(2-4 sentences of prose tracing how members interact at runtime. Pick the
+dominant entry member (likely the gameplay-facing actor / controller) and
+trace 2-3 hops through `in_system: true` edges only. Name members verbatim
+from the input.)
+
+### [ EXTERNAL COUPLING ]
+(Bullet list. For each entry in METADATA.external_dependencies, one line
+naming the other system, the edge type, and which members of THIS system
+participate. If self-contained, write "Self-contained.")
+
+### [ ARCHITECTURAL RISK ]
+(Bullet list of risks tied to specific named members of THIS system. If
+none, "No notable risks.")
+[/ANALYSIS]
+
+NON-NEGOTIABLE RULES
+- ANTI-FABRICATION: every member name / edge target you reference MUST
+  appear verbatim in the input. Don't invent.
+- This is a SINGLE-SYSTEM analysis. Don't catalogue the whole project.
+- METADATA must be valid JSON.
+- Tone: precise, professional, factual.
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Language directive — appended to system prompts when provider_config.language
 # == "zh". Vocabulary tag values stay English (they're consumed as keys by the
 # frontend); only the human-readable narrative shifts to Chinese.
@@ -1049,11 +1143,294 @@ async def get_node_result(task_id: str, node_id: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# L1 (project-level) clustering — runs once after L2.  Reads vault metadata,
-# calls LLM with L1_SYSTEM_PROMPT, writes Systems/_overview.md +
-# _meta/l1_overview.json.  Status reuses the same task hash schema as batch,
-# with total_nodes=1, so the frontend can poll /scan/status/{task_id}.
+# L1 (per-system) — Phase 2 refactor.
+#
+# Two flavours, both backed by analyze_one_system_l1():
+#   - single-system (system_id query param present): one LLM call, scoped to
+#     members of that one system.  Triggered by the Lv1 page button.
+#   - batch (no system_id): discover all distinct system tags from the vault's
+#     L2 frontmatter, sequentially call single-system for each.  Triggered by
+#     the Settings panel's "Run LLM analysis" with L1 checked.
+#
+# The OLD project-clustering L1 (parse_l1_response, process_l1_task,
+# L1_SYSTEM_PROMPT) is kept below as dead code for diff legibility but is no
+# longer reachable — the endpoint dispatches to the new code paths only.
 # ─────────────────────────────────────────────────────────────────────────────
+
+def parse_l1_system_response(raw: str) -> Dict[str, Any]:
+    """Per-system L1 parser.  Extracts the new METADATA shape:
+    {system_id, title, intent, system_risk_level, external_dependencies}.
+    Always returns a dict with parse_ok set; never raises."""
+    out: Dict[str, Any] = {
+        "system_id": "",
+        "title": "",
+        "intent": None,
+        "system_risk_level": "nominal",
+        "external_dependencies": [],
+        "analysis_markdown": raw,
+        "parse_ok": False,
+    }
+    md_match = _METADATA_RE.search(raw)
+    body_match = _ANALYSIS_RE.search(raw)
+
+    if md_match:
+        try:
+            md_obj = json.loads(md_match.group(1).strip())
+            out["system_id"] = str(md_obj.get("system_id") or "")
+            out["title"] = str(md_obj.get("title") or "")
+            out["intent"] = md_obj.get("intent")
+            risk = (md_obj.get("system_risk_level") or "nominal").lower()
+            if risk not in ("nominal", "warning", "critical"):
+                risk = "nominal"
+            out["system_risk_level"] = risk
+            ext = md_obj.get("external_dependencies") or []
+            if isinstance(ext, list):
+                out["external_dependencies"] = [e for e in ext if isinstance(e, dict)]
+            out["parse_ok"] = True
+        except (json.JSONDecodeError, AttributeError) as e:
+            print(f"[SYS_WARN] L1 system METADATA malformed: {e}")
+
+    if body_match:
+        out["analysis_markdown"] = body_match.group(1).strip()
+
+    return out
+
+
+# Hard cap on the per-system input size — at 150 KB JSON we trim outbound
+# edges before re-serialising.  Matches the old project-wide cap.
+_L1_SYSTEM_PROMPT_CAP = 150_000
+
+
+async def analyze_one_system_l1(
+    provider: LLMProvider,
+    project_root: str,
+    system_id: str,
+    language: Optional[str] = None,
+) -> Dict[str, Any]:
+    """L1 base function — analyse ONE system.
+
+    Reads vault L2 metadata, filters to members tagged with `system_id`,
+    annotates outbound edges with `in_system` based on the title set, calls
+    the LLM with L1_SYSTEM_SCOPED_PROMPT, parses, and writes the per-system
+    .md.  Returns {parsed, write_path, llm_response, member_count}.
+
+    Raises ValueError if no L2-scanned members carry this system tag.
+    """
+    all_meta = vault_writer.collect_l2_metadata(project_root)
+    members = [m for m in all_meta if system_id in (m.get("system") or [])]
+    if not members:
+        raise ValueError(
+            f"No L2-scanned blueprints carry the '{system_id}' system tag yet. "
+            f"Run an L2 scan (Settings → Run LLM analysis with L2 checked) first."
+        )
+
+    member_titles = {m.get("title") for m in members if m.get("title")}
+    for m in members:
+        for e in m.get("outbound_edges") or []:
+            if isinstance(e, dict):
+                e["in_system"] = e.get("target") in member_titles
+
+    payload = {"system_id": system_id, "members": members}
+    user_prompt = json.dumps(payload, ensure_ascii=False)
+    if len(user_prompt) > _L1_SYSTEM_PROMPT_CAP:
+        # Trim outbound_edges per member; preserves member roster.
+        for m in members:
+            m["outbound_edges"] = (m.get("outbound_edges") or [])[:8]
+        user_prompt = json.dumps(payload, ensure_ascii=False)
+
+    system_prompt = _apply_language(L1_SYSTEM_SCOPED_PROMPT, language)
+    llm_response = await call_llm(provider, system_prompt, user_prompt)
+    parsed = parse_l1_system_response(llm_response.raw_text)
+
+    write_path: Optional[str] = None
+    if parsed["parse_ok"]:
+        write_path = vault_writer.write_system_l1_narrative(
+            project_root=project_root,
+            system_id=system_id,
+            metadata={
+                "title": parsed["title"] or system_id,
+                "intent": parsed["intent"],
+                "system_risk_level": parsed["system_risk_level"],
+                "external_dependencies": parsed["external_dependencies"],
+            },
+            analysis_markdown=parsed["analysis_markdown"],
+            members=members,
+            model=provider.model_label,
+            language=language,
+        )
+
+    return {
+        "parsed": parsed,
+        "write_path": write_path,
+        "llm_response": llm_response,
+        "member_count": len(members),
+    }
+
+
+async def process_system_l1_task(
+    task_id: str,
+    project_root: str,
+    system_id: str,
+    provider_config_dict: Dict[str, Any],
+) -> None:
+    """Background worker — single-system L1.  Persists the same
+    {status, total_nodes, completed_nodes, failed_nodes, node_statuses}
+    schema as the L2 batch worker so the frontend's polling code is shared."""
+    assert redis_client is not None
+
+    async def set_status(status: str) -> None:
+        await redis_client.hset(f"task:{task_id}", "status", status)
+
+    try:
+        provider = build_provider(provider_config_dict)
+    except Exception as e:
+        await set_status("FAILED")
+        await redis_client.hset(f"task:{task_id}", "error", f"Invalid provider config: {e}")
+        return
+
+    print(
+        f"[L1-system] task={task_id} system={system_id} "
+        f"provider={provider.display_name} model={provider.model_label}"
+    )
+
+    try:
+        await set_status("PROCESSING")
+        await redis_client.hset(f"task:{task_id}:nodes", system_id, "PROCESSING")
+
+        result = await asyncio.wait_for(
+            analyze_one_system_l1(
+                provider, project_root, system_id,
+                language=provider_config_dict.get("language"),
+            ),
+            timeout=180.0,
+        )
+
+        if not result["parsed"]["parse_ok"]:
+            err = "L1 system response did not contain a parseable METADATA block."
+            await redis_client.hset(f"task:{task_id}", "status", "FAILED")
+            await redis_client.hset(f"task:{task_id}", "error", err)
+            await redis_client.hset(f"task:{task_id}:nodes", system_id, "FAILED")
+            await redis_client.hset(f"task:{task_id}:errors", system_id, err)
+            await redis_client.hincrby(f"task:{task_id}", "failed_nodes", 1)
+            await redis_client.set(f"result:{task_id}:{system_id}", result["llm_response"].raw_text)
+            return
+
+        await redis_client.set(
+            f"result:{task_id}:{system_id}",
+            result["parsed"]["analysis_markdown"],
+        )
+        async with redis_client.pipeline(transaction=False) as pipe:
+            pipe.hset(f"task:{task_id}", "status", "COMPLETED")
+            pipe.hset(f"task:{task_id}", "completed_nodes", 1)
+            pipe.hset(f"task:{task_id}:nodes", system_id, "COMPLETED")
+            await pipe.execute()
+        print(f"[L1-system] task={task_id} done — {result['member_count']} members analysed")
+
+    except Exception as e:
+        err_text = f"{type(e).__name__}: {e}"[:1000]
+        print(f"[SYS_ERR] L1 system {system_id} task={task_id} failed: {err_text}")
+        try:
+            async with redis_client.pipeline(transaction=False) as pipe:
+                pipe.hset(f"task:{task_id}", "status", "FAILED")
+                pipe.hset(f"task:{task_id}", "failed_nodes", 1)
+                pipe.hset(f"task:{task_id}", "error", err_text)
+                pipe.hset(f"task:{task_id}:nodes", system_id, "FAILED")
+                pipe.hset(f"task:{task_id}:errors", system_id, err_text)
+                await pipe.execute()
+        except Exception as inner:
+            print(f"[SYS_ERR] Could not record FAILED for {system_id}: {inner}")
+
+
+async def process_batch_l1_task(
+    task_id: str,
+    project_root: str,
+    provider_config_dict: Dict[str, Any],
+) -> None:
+    """Background worker — batch L1: discover system tags from vault L2
+    metadata, then call analyze_one_system_l1 sequentially for each.
+
+    Sequential rather than concurrent because per-system L1 isn't a hot loop
+    and serial calls keep token spend predictable + log lines readable.  When
+    one system fails, the others still run — failures land in node_errors."""
+    assert redis_client is not None
+
+    async def set_status(status: str) -> None:
+        await redis_client.hset(f"task:{task_id}", "status", status)
+
+    try:
+        provider = build_provider(provider_config_dict)
+    except Exception as e:
+        await set_status("FAILED")
+        await redis_client.hset(f"task:{task_id}", "error", f"Invalid provider config: {e}")
+        return
+
+    all_meta = vault_writer.collect_l2_metadata(project_root)
+    system_ids = sorted({s for m in all_meta for s in (m.get("system") or [])})
+    if not system_ids:
+        await set_status("FAILED")
+        await redis_client.hset(
+            f"task:{task_id}", "error",
+            "No L2-scanned blueprints with system tags found. Run an L2 scan first.",
+        )
+        return
+
+    print(
+        f"[L1-batch] task={task_id} systems={len(system_ids)} ({','.join(system_ids)}) "
+        f"provider={provider.display_name} model={provider.model_label}"
+    )
+
+    async with redis_client.pipeline(transaction=False) as pipe:
+        pipe.hset(f"task:{task_id}", "status", "PROCESSING")
+        pipe.hset(f"task:{task_id}", "total_nodes", len(system_ids))
+        for sid in system_ids:
+            pipe.hset(f"task:{task_id}:nodes", sid, "PENDING")
+        await pipe.execute()
+
+    completed = 0
+    failed = 0
+    for sid in system_ids:
+        try:
+            await redis_client.hset(f"task:{task_id}:nodes", sid, "PROCESSING")
+            result = await asyncio.wait_for(
+                analyze_one_system_l1(
+                    provider, project_root, sid,
+                    language=provider_config_dict.get("language"),
+                ),
+                timeout=180.0,
+            )
+            if not result["parsed"]["parse_ok"]:
+                raise RuntimeError("response missing parseable METADATA block")
+            await redis_client.set(
+                f"result:{task_id}:{sid}",
+                result["parsed"]["analysis_markdown"],
+            )
+            await redis_client.hset(f"task:{task_id}:nodes", sid, "COMPLETED")
+            await redis_client.hincrby(f"task:{task_id}", "completed_nodes", 1)
+            completed += 1
+        except Exception as e:
+            err_text = f"{type(e).__name__}: {e}"[:1000]
+            print(f"[SYS_ERR] L1 system {sid} (batch task={task_id}) failed: {err_text}")
+            try:
+                await redis_client.hset(f"task:{task_id}:nodes", sid, "FAILED")
+                await redis_client.hset(f"task:{task_id}:errors", sid, err_text)
+                await redis_client.hincrby(f"task:{task_id}", "failed_nodes", 1)
+            except Exception as inner:
+                print(f"[SYS_ERR] Could not record batch-L1 FAILED for {sid}: {inner}")
+            failed += 1
+
+    final_status = (
+        "COMPLETED" if failed == 0
+        else "PARTIAL_FAIL" if completed > 0
+        else "FAILED"
+    )
+    await redis_client.hset(f"task:{task_id}", "status", final_status)
+    print(
+        f"[L1-batch] task={task_id} done. status={final_status} "
+        f"completed={completed} failed={failed}"
+    )
+
+
+# ── Legacy project-wide L1 (unused after Phase 2 refactor; kept for now) ────
 
 def parse_l1_response(raw: str) -> Dict[str, Any]:
     """Mirror of parse_llm_response, but extracts the L1 metadata shape:
@@ -1194,25 +1571,59 @@ async def process_l1_task(task_id: str, project_root: str, provider_config_dict:
 
 
 @app.post("/api/v1/scan/l1", status_code=202)
-async def create_l1_scan_task(request: L1ScanRequest, background_tasks: BackgroundTasks):
+async def create_l1_scan_task(
+    request: L1ScanRequest,
+    background_tasks: BackgroundTasks,
+    system_id: Optional[str] = None,
+):
+    """L1 scan dispatcher.
+
+    - `system_id=combat` → analyse a single system (Lv1 page button).
+    - no `system_id` → batch all discovered systems sequentially (Settings
+      panel "Run LLM analysis" with L1 checked).
+
+    Either flow uses the per-system L1 base function; the batch worker just
+    discovers system_ids from vault frontmatter and loops.  Both report
+    progress through the same /scan/status schema as the L2 batch worker."""
     if not getattr(app.state, "redis_available", False) or redis_client is None:
         raise HTTPException(status_code=503, detail="L1 scan requires Redis.")
     if not request.project_root:
         raise HTTPException(status_code=400, detail="project_root is required.")
 
     task_id = str(uuid.uuid4())
-    async with redis_client.pipeline(transaction=False) as pipe:
-        pipe.hset(f"task:{task_id}", "status", "PENDING")
-        pipe.hset(f"task:{task_id}", "stage", "L1")
-        pipe.hset(f"task:{task_id}", "total_nodes", 1)
-        pipe.hset(f"task:{task_id}", "completed_nodes", 0)
-        pipe.hset(f"task:{task_id}", "failed_nodes", 0)
-        pipe.hset(f"task:{task_id}", "skipped_nodes", 0)
-        pipe.hset(f"task:{task_id}:nodes", "_overview", "PENDING")
-        await pipe.execute()
-
     cfg_dict = request.provider_config.model_dump()
-    background_tasks.add_task(process_l1_task, task_id, request.project_root, cfg_dict)
+
+    if system_id:
+        # Single-system mode: total_nodes=1, node_id = system_id.
+        async with redis_client.pipeline(transaction=False) as pipe:
+            pipe.hset(f"task:{task_id}", "status", "PENDING")
+            pipe.hset(f"task:{task_id}", "stage", "L1-single")
+            pipe.hset(f"task:{task_id}", "system_id", system_id)
+            pipe.hset(f"task:{task_id}", "total_nodes", 1)
+            pipe.hset(f"task:{task_id}", "completed_nodes", 0)
+            pipe.hset(f"task:{task_id}", "failed_nodes", 0)
+            pipe.hset(f"task:{task_id}", "skipped_nodes", 0)
+            pipe.hset(f"task:{task_id}:nodes", system_id, "PENDING")
+            await pipe.execute()
+        background_tasks.add_task(
+            process_system_l1_task, task_id, request.project_root, system_id, cfg_dict,
+        )
+    else:
+        # Batch mode: total_nodes set inside the worker once it discovers
+        # system tags.  Frontend should not assume total_nodes > 0 until
+        # status leaves PENDING.
+        async with redis_client.pipeline(transaction=False) as pipe:
+            pipe.hset(f"task:{task_id}", "status", "PENDING")
+            pipe.hset(f"task:{task_id}", "stage", "L1-batch")
+            pipe.hset(f"task:{task_id}", "total_nodes", 0)
+            pipe.hset(f"task:{task_id}", "completed_nodes", 0)
+            pipe.hset(f"task:{task_id}", "failed_nodes", 0)
+            pipe.hset(f"task:{task_id}", "skipped_nodes", 0)
+            await pipe.execute()
+        background_tasks.add_task(
+            process_batch_l1_task, task_id, request.project_root, cfg_dict,
+        )
+
     return {"task_id": task_id}
 
 

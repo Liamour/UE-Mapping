@@ -1009,6 +1009,108 @@ def _write_system_md(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Per-system L1 narrative writer (Phase 2 refactor).
+#
+# write_system_l1_narrative() is the new entry point — called once per
+# system_id with parsed METADATA + ANALYSIS body from the per-system L1
+# prompt.  It produces Systems/<system_id>.md directly, without going through
+# the project-wide aggregate flow.  Members come from collect_l2_metadata
+# already filtered upstream (in main.py).
+#
+# Existing _write_system_md / write_l1_overview are kept above as the legacy
+# project-clustering path, currently with no caller.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def write_system_l1_narrative(
+    project_root: str,
+    system_id: str,
+    metadata: Dict[str, Any],
+    analysis_markdown: str,
+    members: List[Dict[str, Any]],
+    model: str = "unknown",
+    language: Optional[str] = None,
+) -> str:
+    """Write Systems/<system_id>.md from a per-system L1 result.
+
+    `metadata` shape: {title, intent, system_risk_level, external_dependencies}
+    `members` is the filtered output of collect_l2_metadata (BPs carrying this
+    system tag).
+
+    Preserves any existing NOTES block — the user's developer notes survive
+    re-runs.  Returns the absolute path of the written file."""
+    root = vault_root(project_root)
+    (root / "Systems").mkdir(parents=True, exist_ok=True)
+
+    s = _strings(language)
+    title = (metadata.get("title") or system_id).strip() or system_id
+    risk = (metadata.get("system_risk_level") or "nominal").lower()
+    if risk not in ("nominal", "warning", "critical"):
+        risk = "nominal"
+    scanned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    fm = {
+        "title": title,
+        "node_type": "System",
+        "system_id": system_id,
+        "axis": system_id,                 # for backward-compat with old per-system MD readers
+        "member_count": len(members),
+        "intent": metadata.get("intent"),
+        "system_risk_level": risk,
+        "risk_level": risk,                # for the existing system-risk pill renderer
+        "external_dependencies": metadata.get("external_dependencies") or [],
+        "scan": {
+            "scanned_at": scanned_at,
+            "model": model,
+            "stage": "L1-system",
+        },
+        "analysis_state": "llm",
+    }
+    frontmatter_text = _render_frontmatter(fm)
+
+    # Member roster — written deterministically below the LLM narrative so a
+    # parse failure on the LLM output still leaves the user with a usable
+    # member list.  asset_index lets us route into the right vault subdir
+    # (Interfaces/Widgets/etc) for non-BP members.
+    asset_index = _build_member_index(members)
+    member_lines: List[str] = []
+    member_lines.append(s["members"])
+    member_lines.append(s["members_caption"].format(n=len(members)))
+    member_lines.append("")
+    for m in members:
+        asset_path = m.get("asset_path") or ""
+        member_title, link = _resolve_member_link(asset_path, asset_index)
+        intent = (m.get("intent") or "").strip()
+        suffix = f" — {intent}" if intent else ""
+        member_lines.append(f"- [{member_title}]({link}){suffix}")
+    member_lines.append("")
+
+    body_lines: List[str] = []
+    body_lines.append(f"# {title}\n")
+    body_lines.append(s["system_risk_callout"].format(risk=risk) + "\n")
+    if analysis_markdown.strip():
+        body_lines.append(analysis_markdown.rstrip() + "\n")
+    else:
+        body_lines.append(s["awaiting_llm"] + "\n")
+    body_lines.extend(member_lines)
+    body_lines.append(s["backlinks"])
+    body_lines.append(BACKLINKS_START)
+    body_lines.append(s["system_aggregate"])
+    body_lines.append(BACKLINKS_END)
+    body_lines.append("")
+    body_text = "\n".join(body_lines)
+
+    out_path = root / "Systems" / f"{_sanitise_filename(system_id)}.md"
+    existing_notes = read_existing_notes(out_path) if out_path.exists() else None
+    notes_text = existing_notes if existing_notes else _initial_notes_block()
+
+    full_text = frontmatter_text + "\n" + body_text + "\n" + notes_text
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    tmp.write_text(full_text, encoding="utf-8")
+    os.replace(tmp, out_path)
+    return str(out_path)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Apply-rename — migrate a vault .md to match a UE asset rename.
 # ─────────────────────────────────────────────────────────────────────────────
 # Used by the TopBar stale-asset dropdown's "Apply rename" button (HANDOFF
