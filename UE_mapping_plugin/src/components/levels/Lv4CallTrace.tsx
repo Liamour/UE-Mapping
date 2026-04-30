@@ -252,16 +252,41 @@ export const Lv4CallTrace: React.FC<Props> = ({ relativePath }) => {
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <label className="muted" style={{ fontSize: 'var(--fs-sm)' }}>
-            {t({ en: 'Depth', zh: '深度' })}:&nbsp;
-            <select
-              value={maxDepth}
-              onChange={(e) => setMaxDepth(Number(e.target.value))}
-              style={{ padding: '2px 6px' }}
-            >
-              {[1, 2, 3, 4, 5].map((d) => <option key={d} value={d}>{d}</option>)}
-            </select>
-          </label>
+          {/*
+            Button-group depth picker.  An HTML <select> would crash CEF
+            (UE5 WebBrowser) on some Windows configs because the Chromium
+            popup widget can't resolve a parent HWND inside the embedded
+            view — surfaces as a __debugbreak() / 0xC0000005 in
+            UnrealEditor-WebBrowser.dll.  Custom toggle group avoids the
+            popup entirely.
+          */}
+          <span className="muted" style={{ fontSize: 'var(--fs-sm)' }}>
+            {t({ en: 'Depth', zh: '深度' })}:
+          </span>
+          <div className="depth-picker" role="radiogroup" aria-label="depth">
+            {[1, 2, 3, 4, 5].map((d) => (
+              <button
+                key={d}
+                type="button"
+                role="radio"
+                aria-checked={d === maxDepth}
+                onClick={() => setMaxDepth(d)}
+                style={{
+                  padding: '2px 8px',
+                  border: '1px solid #d8d4c8',
+                  background: d === maxDepth ? '#3b82f6' : 'transparent',
+                  color: d === maxDepth ? '#fff' : 'inherit',
+                  cursor: 'pointer',
+                  fontSize: 'var(--fs-sm)',
+                  borderRadius: 0,
+                  marginLeft: -1,    // collapse adjacent borders
+                  fontWeight: d === maxDepth ? 600 : 400,
+                }}
+              >
+                {d}
+              </button>
+            ))}
+          </div>
           <code className="muted">{relativePath}</code>
         </div>
       </div>
