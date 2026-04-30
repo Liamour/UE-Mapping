@@ -15,7 +15,10 @@
 import {
   bridgeListBlueprintAssets,
   bridgeRequestDeepScan,
+  bridgeGetReflectionAssetSummary,
+  isReflectionSummaryAvailable,
   type BridgeAssetEntry,
+  type BridgeAssetSummary,
   type BridgeDeepScanResult,
 } from './bridgeApi';
 import {
@@ -40,6 +43,12 @@ export type ProjectScanPhase =
   | { kind: 'idle' }
   | { kind: 'listing' }
   | { kind: 'fingerprinting'; done: number; total: number; failures: ScanFailure[] }
+  // A2 reflection enrichment — runs between fingerprinting and L2 submit
+  // when the C++ bridge exposes getreflectionassetsummary.  Pulls UFUNCTION
+  // flags + UPROPERTY metadata + class-level deps for each asset so the
+  // LLM scan has authoritative structural context (and stops hallucinating
+  // function names / property types).  Skipped silently on older plugin.
+  | { kind: 'enriching'; done: number; total: number; failures: ScanFailure[] }
   | { kind: 'l2-submitting' }
   | { kind: 'l2-scanning'; status: ScanStatus; failures: ScanFailure[] }
   | { kind: 'l1-submitting' }
@@ -113,13 +122,36 @@ export async function runProjectScan(opts: ProjectScanOptions): Promise<ProjectS
         const assetPathToName: Record<string, string> = {};
         for (const r of fresh) assetPathToName[r.asset_path] = r.name;
 
+        // ── A2 Reflection enrichment ────────────────────────────────────────
+        // For each fingerprinted asset, also pull the Reflection-derived
+        // summary (UFUNCTION flags / UPROPERTY metadata / class-level deps)
+        // when the bridge exposes it.  We do this AFTER deepscan so a single
+        // worker can fingerprint + enrich without serial bridge calls per
+        // asset (more pleasant progress UX).  Failures are collected as
+        // failures[] entries but never block the scan — the LLM just gets
+        // less context for that asset.
+        const reflectionByAsset = new Map<string, BridgeAssetSummary>();
+        if (isReflectionSummaryAvailable()) {
+          onPhase({ kind: 'enriching', done: 0, total: fresh.length, failures: [...failures] });
+          await enrichWithReflection(
+            fresh, reflectionByAsset, failures,
+            (done) => onPhase({
+              kind: 'enriching', done, total: fresh.length, failures: [...failures],
+            }),
+            signal,
+          );
+        }
+
         // Build payload through the shared helper.  Both batch and single-node
         // scan paths funnel through services/scanPayload.ts so they ship
         // identical ast_data shapes (exports / components / edges) — the LLM
         // and the vault writer see the same view of the AST regardless of
         // which entry point triggered the scan.  See §15.7 in HANDOFF.md.
         const payload = fresh.map((r) =>
-          buildScanNodeFromBridge(r, deriveNodeId(r), assetPathToName),
+          buildScanNodeFromBridge(
+            r, deriveNodeId(r), assetPathToName,
+            reflectionByAsset.get(r.asset_path) ?? null,
+          ),
         );
 
         onPhase({ kind: 'l2-submitting' });
@@ -252,6 +284,52 @@ async function fingerprintAll(
   );
   await Promise.all(workers);
   return results;
+}
+
+// ── A2 enrichment helper ─────────────────────────────────────────────────
+// Walks the same asset list a second time, pulling reflection summaries
+// in parallel (same concurrency cap as deepscan).  Mutates `out` in place.
+// Failures land in `failures` but are non-fatal — the asset still goes
+// through the LLM scan, just without flag tokens / properties context.
+async function enrichWithReflection(
+  fresh: BridgeDeepScanResult[],
+  out: Map<string, BridgeAssetSummary>,
+  failures: ScanFailure[],
+  onProgress: (done: number) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  let done = 0;
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < fresh.length) {
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      const idx = cursor++;
+      const r = fresh[idx];
+      try {
+        const summary = await bridgeGetReflectionAssetSummary(r.asset_path);
+        out.set(r.asset_path, summary);
+      } catch (e) {
+        // Reflection failures are non-fatal — log them but let the scan
+        // proceed.  Common case: an asset that's a non-UClass (e.g.
+        // a DataAsset before Phase B widens the bridge filter).  The LLM
+        // just won't see properties / flags for that one.
+        failures.push({
+          asset_path: r.asset_path,
+          reason: `reflection summary failed: ${formatError(e)}`,
+        });
+      } finally {
+        done++;
+        onProgress(done);
+      }
+    }
+  }
+
+  const workers = Array.from(
+    { length: Math.min(DEEP_SCAN_CONCURRENCY, fresh.length) },
+    () => worker(),
+  );
+  await Promise.all(workers);
 }
 
 function deriveNodeId(r: BridgeDeepScanResult): string {

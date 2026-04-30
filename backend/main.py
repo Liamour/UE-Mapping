@@ -45,12 +45,14 @@ DEFAULT_VOCAB_PATH = Path(__file__).parent / "tag_vocabulary_default.json"
 # ─────────────────────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are a senior Unreal Engine 5 systems architect.
-Analyze the provided Blueprint AST and produce TWO sections in this exact order.
 
-The reader already has the raw AST in front of them — variable names, function
-signatures, dispatcher lists. Do NOT restate that inventory. Your value is in
-NARRATING the runtime behavior: which member calls which, in what order, and
-what observable state changes as a result.
+You will receive a Blueprint's STRUCTURE (functions, properties, components,
+class dependencies — extracted via C++ Reflection so the names are
+authoritative) and its RUNTIME GRAPH (K2Node walk of who-calls-who within the
+project). Your job is to NARRATE the runtime behaviour over that structure,
+not to re-extract it.
+
+Produce TWO sections in this exact order — no preamble, no closing remarks.
 
 [METADATA]
 {
@@ -64,45 +66,73 @@ what observable state changes as a result.
 
 [ANALYSIS]
 ### [ INTENT ]
-(1 sentence explaining the core purpose. State *what runtime problem this BP solves*, not what it contains.)
+(One sentence. State the runtime problem this BP solves for the gameplay loop —
+not what it contains. Bad: "Manages the player". Good: "Owns the player's
+movement-input → animation-state pipeline so AI can drive the same character
+class without reimplementing locomotion".)
 
 ### [ EXECUTION FLOW ]
-(Narrate, as prose, the dominant runtime path. Pick the entry point that matters
-most — BeginPlay, Tick, an event, a public function — and follow it node by node.
-Name specific function-call / branch / cast / spawn nodes from the AST. Explain
-what state mutates at each hop. 3-6 sentences. NEVER bullet a list of nodes.)
+(3-6 sentences of prose. Pick the dominant entry point (BeginPlay, Tick, a
+named event, the most-called public function) and trace the runtime path through
+specific NAMED nodes: "BeginPlay → SpawnDefaultWeapon → casts result into
+CurrentWeapon → broadcasts OnWeaponEquipped → BP_HUD listens and updates the
+ammo widget". Explain what state mutates and what triggers downstream. Do NOT
+bullet a list of nodes — write as prose.)
 
 ### [ MEMBER INTERACTIONS ]
-(For each non-trivial member — function, event, dispatcher, or stateful variable —
-describe in one bullet what it DOES and who CALLS / READS / WRITES it. Concrete
-example shape:
-- `OnDamageReceived` (event): broadcast when CurrentHP <= 0; consumed by `GameMode.HandleDeath` and the death-screen widget.
-- `EquipWeapon(weaponClass)`: spawns the actor, attaches to `WeaponSocket`, casts the result into `CurrentWeapon`. Called from `BP_PlayerController.OnFireInput`.
-Skip pure getters and trivial passthrough setters. The point is the *graph of calls*, not a member catalog.)
+(For each non-trivial member, one bullet: what it does + who calls/reads/writes
+it. Reference functions, properties, and dispatchers BY NAME from the provided
+inventory. Skip pure getters and trivial passthrough setters. Example shapes:
+- `OnDamageReceived` (event): broadcast when `CurrentHP` <= 0; consumed by
+  `BP_GameMode.HandleDeath` and the death-screen widget.
+- `EquipWeapon(weaponClass)` [BlueprintCallable]: spawns the actor, attaches it
+  to `WeaponSocket`, casts the result into `CurrentWeapon`. Called from
+  `BP_PlayerController.OnFireInput`.
+- `bIsAirborne` [Replicated, BlueprintReadOnly]: written by `LandedHandler` on
+  the server; read by the AnimBP's locomotion state machine.
+The point is the *graph of calls*, not a member catalog.)
 
 ### [ EXTERNAL COUPLING ]
-(Bullet only the cross-blueprint relationships visible in the AST: who this BP
-spawns, casts to, calls via interfaces, or listens to. Name the other blueprint
-or interface explicitly. If this BP is self-contained, write "Self-contained.")
+(Bullet the cross-blueprint relationships. Use the provided "Implements
+interfaces" / "Hard refs" / "Soft refs" lists AS YOUR SOURCE for interface
+contracts and class-level coupling; use the K2 graph edges for the actual
+call-site direction. Name the other blueprint or interface explicitly with the
+edge type — spawn / cast / interface_call / listens_to. If this BP is
+self-contained, write "Self-contained.")
 
 ### [ ARCHITECTURAL RISK ]
-(Performance bottlenecks, broken contracts, race conditions, god-object tendencies,
-or unguarded casts. If none, output "No notable risks.")
+(Performance bottlenecks, broken contracts, race conditions, god-object
+tendencies, unguarded casts, replication smell. Tie each risk to a SPECIFIC
+named member or edge. Examples:
+- "Unguarded `Cast<BP_Player>` in `OnOverlapBegin` — overlapping a non-player
+  pawn returns null and silently no-ops the trigger."
+- "Tick reads + writes `BroadcastHealth` every frame — collapse to broadcast
+  on threshold instead."
+If none, output "No notable risks.")
 [/ANALYSIS]
 
-CONTROLLED VOCABULARY — you MUST pick tag values only from these lists:
+CONTROLLED VOCABULARY — pick tag values only from these lists:
 - system axis: gameplay-core, combat, ai, animation, physics, network, multiplayer-meta, ui, audio, vfx, cinematic, camera, input, world, spawn, persistence, progression, economy, analytics, tooling
 - layer axis: gameplay, framework, ui, data, service, tooling
 - role axis: actor, component, widget, controller, gamemode, gamestate, playerstate, subsystem, interface, function-library, data-asset, data-table, struct, enum, animation-blueprint, behavior-tree
 
-Rules:
-- Tone: precise, professional, factual. No conversational fluff, no marketing language.
-- A blueprint may legitimately span multiple systems — list all that apply (up to 3), most dominant first.
+NON-NEGOTIABLE RULES
+- ANTI-FABRICATION: every function / property / dispatcher / interface name
+  you reference MUST appear verbatim in the provided STRUCTURE block. If a
+  name is not listed, do NOT invent it. When you're unsure, prefer "the
+  spawn-handling code path" over a guessed function name.
+- Tone: precise, professional, factual. No conversational fluff, no marketing
+  language.
+- Do NOT restate the inventory — the user is reading the .md alongside this
+  analysis and already sees the function / property tables. Your value is the
+  NARRATIVE, not duplication.
+- A blueprint may legitimately span multiple systems — list up to 3 in the
+  `system` array, most dominant first.
 - Do not invent tag values. If unsure, pick the closest from the vocabulary.
-- Do not duplicate the AST inventory — the markdown view already lists Variables /
-  Functions / Events / Dispatchers from frontmatter. Your job is to explain how
-  they interact, not to list them.
 - METADATA block must be valid JSON.
+- When STRUCTURE shows "(none)" for a section (e.g. no events), the
+  corresponding bullet in MEMBER INTERACTIONS may be omitted — don't pad with
+  speculation.
 """
 
 
@@ -410,12 +440,7 @@ async def analyze_one_node(
     language: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Returns: {parsed: ..., write_result: {...} | None, llm_response: LLMResponse}"""
-    ast_string = json.dumps(node.ast_data)[:8000] if node.ast_data else "Empty AST"
-    user_prompt = (
-        f"Analyze this UE5 Blueprint AST.\n"
-        f"Blueprint Path: {node.asset_path}\n"
-        f"AST Data:\n{ast_string}"
-    )
+    user_prompt = _build_user_prompt(node)
     system_prompt = _apply_language(SYSTEM_PROMPT, language)
     llm_response = await call_llm(provider, system_prompt, user_prompt)
     parsed = parse_llm_response(llm_response.raw_text)
@@ -424,12 +449,38 @@ async def analyze_one_node(
     if project_root:
         title = node.title or node.asset_path.split("/")[-1].split(".")[-1] or node.node_id
         # Pull structured AST fields out of ast_data so write_node_file can
-        # persist them in the frontmatter `exports`, `components`, `variables`
-        # blocks.  The frontend (both batch and single-node paths) ships these
-        # under the same keys; missing keys are tolerated and default to [].
+        # persist them in the frontmatter `exports`, `components`, `variables`,
+        # `properties`, `function_flags`, `class_dependencies` blocks.  The
+        # frontend (both batch and single-node paths) ships these under the
+        # same keys; missing keys are tolerated and default to [] / {}.
         # Without this propagation the LLM scan wipes the framework-scan
-        # skeleton's exports/components — which is the bug §15 documents.
+        # skeleton's reflection blocks — which is the bug §15 documents,
+        # extended in §21.5 (A2) to cover properties/flags/deps.
         ast = node.ast_data if isinstance(node.ast_data, dict) else {}
+        class_deps_raw = ast.get("class_dependencies") or {}
+        class_deps: Dict[str, List[str]] = {}
+        if isinstance(class_deps_raw, dict):
+            for axis in ("hard_refs", "soft_refs", "interfaces"):
+                vals = class_deps_raw.get(axis) or []
+                if isinstance(vals, list) and vals:
+                    class_deps[axis] = [str(x) for x in vals]
+        function_flags_raw = ast.get("function_flags") or {}
+        function_flags: Dict[str, List[str]] = {}
+        if isinstance(function_flags_raw, dict):
+            for fname, flags in function_flags_raw.items():
+                if isinstance(flags, list):
+                    function_flags[str(fname)] = [str(x) for x in flags]
+        properties_raw = ast.get("properties") or []
+        properties: List[Dict[str, Any]] = []
+        if isinstance(properties_raw, list):
+            for p in properties_raw:
+                if isinstance(p, dict) and p.get("name"):
+                    properties.append({
+                        "name": str(p["name"]),
+                        "type": str(p.get("type", "")),
+                        "flags": [str(x) for x in (p.get("flags") or []) if x],
+                    })
+
         record = vault_writer.NodeRecord(
             node_id=node.node_id,
             title=title,
@@ -452,6 +503,9 @@ async def analyze_one_node(
             exports_dispatchers=list(ast.get("exports_dispatchers") or []),
             variables=list(ast.get("variables") or []),
             components=list(ast.get("components") or []),
+            properties=properties,
+            function_flags=function_flags,
+            class_dependencies=class_deps,
         )
         write_result = vault_writer.write_node_file(
             project_root=project_root,
@@ -466,6 +520,178 @@ async def analyze_one_node(
         "write_result": write_result,
         "llm_response": llm_response,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# User-prompt builder — separates the now-rich structural context (Reflection
+# exports / properties / class deps) from the raw K2 edge walk so the LLM
+# treats them as authoritative inventory rather than blob to extract from.
+# Caps each section to keep token budget manageable on big BPs.  When
+# Reflection data is missing (older plugin), we fall back to dumping the
+# legacy ast_data JSON so the LLM still has something — it just gets less
+# aid against fabrication.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Hard caps on how many items per section we ship to the LLM.  Real BPs rarely
+# exceed these; runaways (auto-generated DataAssets, library BPs with hundreds
+# of helpers) get tail-trimmed with a "+N more" hint.
+_MAX_ITEMS_PER_SECTION = 64
+# Hard cap on the legacy fallback JSON dump; matches the original 8000-char
+# truncation so behaviour is unchanged when Reflection isn't available.
+_LEGACY_AST_DUMP_CAP = 8000
+
+
+def _format_list(items: List[str], cap: int = _MAX_ITEMS_PER_SECTION) -> str:
+    if not items:
+        return "(none)"
+    if len(items) <= cap:
+        return ", ".join(items)
+    return ", ".join(items[:cap]) + f", … (+{len(items) - cap} more)"
+
+
+def _format_function_inventory(
+    names: List[str],
+    flags_by_name: Dict[str, List[str]],
+    label: str,
+    cap: int = _MAX_ITEMS_PER_SECTION,
+) -> str:
+    if not names:
+        return f"- {label}: (none)"
+    rendered: List[str] = []
+    for n in names[:cap]:
+        flags = flags_by_name.get(n) or []
+        rendered.append(f"{n}({', '.join(flags)})" if flags else n)
+    suffix = f" … (+{len(names) - cap} more)" if len(names) > cap else ""
+    return f"- {label}: {', '.join(rendered)}{suffix}"
+
+
+def _format_properties(properties: List[Dict[str, Any]], cap: int = _MAX_ITEMS_PER_SECTION) -> List[str]:
+    if not properties:
+        return ["- Properties: (none surfaced via Reflection)"]
+    out = ["- Properties (name : type [flags]):"]
+    for p in properties[:cap]:
+        name = p.get("name", "")
+        ptype = p.get("type", "")
+        flags = p.get("flags") or []
+        flag_str = f" [{', '.join(flags)}]" if flags else ""
+        out.append(f"    · {name} : {ptype}{flag_str}")
+    if len(properties) > cap:
+        out.append(f"    · … (+{len(properties) - cap} more)")
+    return out
+
+
+def _format_edges_block(edges: Dict[str, Any]) -> List[str]:
+    """Pretty-print the K2 edge walk grouped by edge_type.  Limits per-kind
+    so a hub BP doesn't gobble the whole context window."""
+    if not edges or not isinstance(edges, dict):
+        return ["- K2 graph edges: (none)"]
+    out = ["- K2 graph edges (this BP → others, observed via UEdGraph walk):"]
+    for kind, entries in edges.items():
+        if not isinstance(entries, list) or not entries:
+            continue
+        out.append(f"    {kind}:")
+        for e in entries[:_MAX_ITEMS_PER_SECTION]:
+            if not isinstance(e, dict):
+                continue
+            target = e.get("target", "?")
+            refs = e.get("refs") or []
+            refs_str = "; ".join(str(r) for r in refs[:6])
+            if len(refs) > 6:
+                refs_str += f"; +{len(refs) - 6}"
+            out.append(f"      · → {target}" + (f"  ({refs_str})" if refs_str else ""))
+        if len(entries) > _MAX_ITEMS_PER_SECTION:
+            out.append(f"      · … (+{len(entries) - _MAX_ITEMS_PER_SECTION} more)")
+    return out
+
+
+def _build_user_prompt(node: ASTNodePayload) -> str:
+    """Compose the structured user prompt for a single-node analysis.
+
+    A2 contract: when ast_data carries the Reflection enrichment fields
+    (`function_flags`, `properties`, `class_dependencies`), present them as
+    a tidy inventory so the LLM treats them as ground truth.  When they're
+    missing (older plugin), fall back to a JSON dump of ast_data so the
+    behaviour matches pre-A2 backends.
+    """
+    ast = node.ast_data if isinstance(node.ast_data, dict) else {}
+    has_reflection = any(
+        ast.get(k) for k in ("function_flags", "properties", "class_dependencies")
+    )
+
+    header = (
+        f"Analyze this UE5 Blueprint.\n"
+        f"Blueprint Path: {node.asset_path}\n"
+        f"Title: {node.title or node.node_id}\n"
+        f"Type: {node.node_type}"
+        + (f"\nParent class: {node.parent_class}" if node.parent_class else "")
+    )
+
+    if not has_reflection:
+        # Legacy path — pre-A2 plugin or DataAsset-class that the bridge
+        # didn't enrich.  Hand the LLM the raw blob.
+        ast_string = json.dumps(node.ast_data)[:_LEGACY_AST_DUMP_CAP] if node.ast_data else "Empty AST"
+        return f"{header}\n\nAST Data:\n{ast_string}"
+
+    # A2 enriched path — structured sections.
+    fns = list(ast.get("exports_functions") or [])
+    events = list(ast.get("exports_events") or [])
+    dispatchers = list(ast.get("exports_dispatchers") or [])
+    flags_by_name = ast.get("function_flags") or {}
+    if not isinstance(flags_by_name, dict):
+        flags_by_name = {}
+    properties = ast.get("properties") or []
+    if not isinstance(properties, list):
+        properties = []
+    components_raw = ast.get("components") or []
+    components: List[Dict[str, Any]] = [c for c in components_raw if isinstance(c, dict)]
+    class_deps = ast.get("class_dependencies") or {}
+    if not isinstance(class_deps, dict):
+        class_deps = {}
+    edges = ast.get("edges") or {}
+
+    sections: List[str] = [
+        header,
+        "",
+        "STRUCTURE — extracted from C++ Reflection + AssetRegistry. TRUST these names; if you reference a function / property / interface NOT listed below, that is a fabrication.",
+        "",
+        _format_function_inventory(fns, flags_by_name, "Functions"),
+        _format_function_inventory(events, flags_by_name, "Events"),
+        _format_function_inventory(dispatchers, flags_by_name, "Dispatchers"),
+    ]
+
+    sections.extend(_format_properties(properties))
+
+    if components:
+        rendered_components: List[str] = []
+        for c in components[:_MAX_ITEMS_PER_SECTION]:
+            name = c.get("name", "")
+            klass = c.get("class", "")
+            parent = c.get("parent", "")
+            label = f"{name}:{klass}"
+            if parent:
+                label += f" (under {parent})"
+            rendered_components.append(label)
+        if len(components) > _MAX_ITEMS_PER_SECTION:
+            rendered_components.append(f"… (+{len(components) - _MAX_ITEMS_PER_SECTION} more)")
+        sections.append(f"- Components: {', '.join(rendered_components)}")
+    else:
+        sections.append("- Components: (none)")
+
+    sections.append(
+        f"- Implements interfaces: {_format_list([str(x) for x in (class_deps.get('interfaces') or [])])}"
+    )
+    sections.append(
+        f"- Hard refs (loaded classes under /Game/): {_format_list([str(x) for x in (class_deps.get('hard_refs') or [])])}"
+    )
+    sections.append(
+        f"- Soft refs (TSoftClassPtr / TSoftObjectPtr): {_format_list([str(x) for x in (class_deps.get('soft_refs') or [])])}"
+    )
+
+    sections.append("")
+    sections.append("RUNTIME GRAPH — what THIS BP does to others (K2Node walk).")
+    sections.extend(_format_edges_block(edges))
+
+    return "\n".join(sections)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

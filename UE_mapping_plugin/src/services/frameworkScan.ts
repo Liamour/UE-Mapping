@@ -25,7 +25,10 @@ import {
   bridgeRequestDeepScan,
   bridgeWriteVaultFile,
   bridgeReadVaultFile,
+  bridgeGetReflectionAssetSummary,
+  isReflectionSummaryAvailable,
   type BridgeAssetEntry,
+  type BridgeAssetSummary,
   type BridgeDeepScanResult,
 } from './bridgeApi';
 import { listVault, readVaultFile } from './vaultApi';
@@ -79,6 +82,12 @@ export async function runFrameworkScan(
     signal,
   );
 
+  // A2: pull reflection summaries (UFUNCTION flags + UPROPERTY metadata +
+  // class deps) so the skeleton .md frontmatter mirrors what the LLM scan
+  // sees.  Best-effort — older C++ builds skip this entirely; per-asset
+  // failures degrade gracefully (missing fields, no scan abort).
+  const reflectionByAsset = await collectReflectionSummaries(fingerprints, signal);
+
   // Build an asset_path → existing-vault-relative-path map.  Lets us preserve
   // the user's manual organisation: if a .md was hand-moved into a custom
   // folder, this scan rewrites it in place instead of dropping a fresh copy
@@ -99,7 +108,10 @@ export async function runFrameworkScan(
       const existingPath = existingByAsset.byAsset.get(entry.asset_path);
       const relPath = existingPath ?? vaultPathFor(entry);
       const existingNotes = await loadExistingNotes(projectRoot, relPath);
-      const md = renderSkeletonMd(entry, fingerprints, existingNotes);
+      const md = renderSkeletonMd(
+        entry, fingerprints, existingNotes,
+        reflectionByAsset.get(entry.asset_path) ?? null,
+      );
       await bridgeWriteVaultFile(projectRoot, relPath, md);
       written++;
     } catch (e) {
@@ -153,6 +165,19 @@ export async function syncSingleAsset(
 ): Promise<{ relativePath: string; entry: BridgeDeepScanResult }> {
   const entry = await bridgeRequestDeepScan(assetPath);
 
+  // Best-effort reflection enrichment so the rescanned skeleton .md keeps
+  // properties / function_flags / class_dependencies aligned with what a
+  // full framework scan would produce.  Older plugin builds → null; bridge
+  // throws → null.  Non-fatal in either case.
+  let reflection: BridgeAssetSummary | null = null;
+  if (isReflectionSummaryAvailable()) {
+    try {
+      reflection = await bridgeGetReflectionAssetSummary(assetPath);
+    } catch {
+      reflection = null;
+    }
+  }
+
   // Look up an existing vault note for this asset.  Falls back to the
   // deterministic Blueprints/<Name>.md when nothing exists (added case).
   const index = await buildExistingVaultIndex(projectRoot);
@@ -164,7 +189,7 @@ export async function syncSingleAsset(
   // the full fingerprint set — pass an empty array so renderSkeletonMd
   // simply skips edge target name resolution.  The next full framework
   // scan will refill those links.
-  const md = renderSkeletonMd(entry, [entry], existingNotes);
+  const md = renderSkeletonMd(entry, [entry], existingNotes, reflection);
   await bridgeWriteVaultFile(projectRoot, relPath, md);
   return { relativePath: relPath, entry };
 }
@@ -203,6 +228,41 @@ async function fingerprintAll(
   return results;
 }
 
+// A2 reflection enrichment.  Returns a Map keyed by asset_path; absent
+// entries mean either the bridge endpoint isn't bound (older plugin) or
+// the per-asset call threw (corrupt asset, non-UClass, etc).  Failures
+// are intentionally swallowed here — the skeleton render falls back to
+// the legacy frontmatter shape and the caller's UI surfaces nothing
+// surprising.  Concurrency matches FRAMEWORK_SCAN_CONCURRENCY so we don't
+// hammer the bridge harder than the deepscan pass already does.
+async function collectReflectionSummaries(
+  fingerprints: BridgeDeepScanResult[],
+  signal: AbortSignal | undefined,
+): Promise<Map<string, BridgeAssetSummary>> {
+  const out = new Map<string, BridgeAssetSummary>();
+  if (!isReflectionSummaryAvailable() || fingerprints.length === 0) return out;
+
+  let cursor = 0;
+  async function worker() {
+    while (cursor < fingerprints.length) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      const idx = cursor++;
+      const r = fingerprints[idx];
+      try {
+        const summary = await bridgeGetReflectionAssetSummary(r.asset_path);
+        out.set(r.asset_path, summary);
+      } catch {
+        // Non-fatal — skeleton render will skip the reflection blocks
+        // for this asset.
+      }
+    }
+  }
+
+  const pool = Math.min(FRAMEWORK_SCAN_CONCURRENCY, fingerprints.length);
+  await Promise.all(Array.from({ length: pool }, () => worker()));
+  return out;
+}
+
 async function loadExistingNotes(projectRoot: string, relPath: string): Promise<string> {
   try {
     const file = await bridgeReadVaultFile(projectRoot, relPath);
@@ -238,6 +298,7 @@ function renderSkeletonMd(
   entry: BridgeDeepScanResult,
   allEntries: BridgeDeepScanResult[],
   preservedNotes: string,
+  reflection: BridgeAssetSummary | null = null,
 ): string {
   const assetPathToName: Record<string, string> = {};
   for (const e of allEntries) assetPathToName[e.asset_path] = e.name;
@@ -246,6 +307,17 @@ function renderSkeletonMd(
   const userFns = fns.filter((f) => f.kind === 'function').map((f) => f.name);
   const events = fns.filter((f) => f.kind === 'event' || f.kind === 'custom_event').map((f) => f.name);
   const dispatchers = fns.filter((f) => f.kind === 'dispatcher').map((f) => f.name);
+
+  // A2 reflection blobs — only emitted when the bridge supplied them, so
+  // pre-A2 vaults don't grow empty `properties: []` keys.
+  const reflectionFunctionFlags: Record<string, string[]> = {};
+  if (reflection) {
+    for (const f of reflection.exports ?? []) {
+      reflectionFunctionFlags[f.name] = f.flags ?? [];
+    }
+  }
+  const reflectionProperties = reflection?.properties ?? [];
+  const reflectionEdges = reflection?.edges;
 
   // Group outbound edges by mapped kind, deduping (target, refs) tuples.
   const edgesByKind: Record<string, Array<{ target: string; refs: string[] }>> = {};
@@ -299,6 +371,53 @@ function renderSkeletonMd(
       lines.push(`  - name: ${yamlScalar(c.name)}`);
       lines.push(`    class: ${yamlScalar(c.class)}`);
       if (c.parent) lines.push(`    parent: ${yamlScalar(c.parent)}`);
+    }
+  }
+  // A2 reflection — properties live alongside components since they share
+  // the "this is what the BP exposes" mental model.  `flags` is always
+  // emitted even when empty so YAML readers see the property's full shape.
+  if (reflectionProperties.length > 0) {
+    lines.push(`properties:`);
+    for (const p of reflectionProperties) {
+      lines.push(`  - name: ${yamlScalar(p.name)}`);
+      lines.push(`    type: ${yamlScalar(p.type)}`);
+      if (p.flags && p.flags.length > 0) {
+        lines.push(`    flags:`);
+        for (const f of p.flags) lines.push(`      - ${yamlScalar(f)}`);
+      }
+    }
+  }
+  // function_flags is a name → flag-list map.  We render only when at least
+  // one entry has flags — pre-A2 .md files end up identical to today.
+  if (Object.values(reflectionFunctionFlags).some((flags) => flags.length > 0)) {
+    lines.push(`function_flags:`);
+    for (const [name, flags] of Object.entries(reflectionFunctionFlags)) {
+      if (flags.length === 0) continue;
+      lines.push(`  ${yamlScalar(name)}:`);
+      for (const f of flags) lines.push(`    - ${yamlScalar(f)}`);
+    }
+  }
+  // class_dependencies surfaces hard / soft / interface refs from the
+  // AssetRegistry walk.  Useful for the LLM (interface-call resolution)
+  // and for users browsing the .md directly.
+  if (
+    reflectionEdges &&
+    ((reflectionEdges.hard_refs?.length ?? 0) > 0 ||
+      (reflectionEdges.soft_refs?.length ?? 0) > 0 ||
+      (reflectionEdges.interfaces?.length ?? 0) > 0)
+  ) {
+    lines.push(`class_dependencies:`);
+    if ((reflectionEdges.hard_refs?.length ?? 0) > 0) {
+      lines.push(`  hard_refs:`);
+      for (const p of reflectionEdges.hard_refs) lines.push(`    - ${yamlScalar(p)}`);
+    }
+    if ((reflectionEdges.soft_refs?.length ?? 0) > 0) {
+      lines.push(`  soft_refs:`);
+      for (const p of reflectionEdges.soft_refs) lines.push(`    - ${yamlScalar(p)}`);
+    }
+    if ((reflectionEdges.interfaces?.length ?? 0) > 0) {
+      lines.push(`  interfaces:`);
+      for (const p of reflectionEdges.interfaces) lines.push(`    - ${yamlScalar(p)}`);
     }
   }
   if (Object.keys(edgesByKind).length > 0) {

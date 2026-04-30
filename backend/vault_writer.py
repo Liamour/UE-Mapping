@@ -141,6 +141,16 @@ class NodeRecord:
     variables: List[Dict[str, Any]] = field(default_factory=list)
     components: List[Dict[str, Any]] = field(default_factory=list)
 
+    # ── A2 Reflection-derived (HANDOFF §21.5) ──────────────────────────────
+    # Populated when the C++ bridge's GetReflectionAssetSummary is bound and
+    # the frontend forwards its result through ast_data.  These fields shift
+    # the LLM contract from "extract structure from k2node dumps" to
+    # "narrate runtime behaviour over a known structure" — see B prompt
+    # rewrite in main.py:SYSTEM_PROMPT.
+    properties: List[Dict[str, Any]] = field(default_factory=list)
+    function_flags: Dict[str, List[str]] = field(default_factory=dict)
+    class_dependencies: Dict[str, List[str]] = field(default_factory=dict)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Path helpers
@@ -247,6 +257,28 @@ def _build_frontmatter(
         # Each entry is {name, class, parent} — written verbatim from the
         # bridge's SCS walker.
         fm["components"] = node.components
+
+    # A2 reflection blocks — emitted only when the bridge supplied them so
+    # pre-A2 vault files don't grow empty keys after a rescan.  Lv2 reads
+    # these to render UPROPERTY tables and class-dep chips alongside the
+    # existing exports/components view.
+    if node.properties:
+        fm["properties"] = node.properties
+    if node.function_flags:
+        # Filter to non-empty flag lists — a function with no flag tokens
+        # is just a regular BP function and saving "FuncName: []" only
+        # adds noise to the .md.
+        non_empty = {k: v for k, v in node.function_flags.items() if v}
+        if non_empty:
+            fm["function_flags"] = non_empty
+    if node.class_dependencies:
+        # Drop empty axes ({hard_refs: []}) before emitting so the .md
+        # stays terse for self-contained BPs.
+        non_empty_deps = {
+            axis: refs for axis, refs in node.class_dependencies.items() if refs
+        }
+        if non_empty_deps:
+            fm["class_dependencies"] = non_empty_deps
 
     # EDGES (AST-derived, typed) — grouped by edge_type
     if node.edges_out:
