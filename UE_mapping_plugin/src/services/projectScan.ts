@@ -179,7 +179,12 @@ export async function runProjectScan(opts: ProjectScanOptions): Promise<ProjectS
         for (const [nodeId, st] of Object.entries(l2Status.node_statuses ?? {})) {
           if (st === 'FAILED') {
             const sourceAsset = payload.find((p) => p.node_id === nodeId)?.asset_path ?? nodeId;
-            failures.push({ asset_path: sourceAsset, reason: 'backend marked node FAILED' });
+            // Pull the real exception text the backend persisted to Redis.
+            // Falls back to the generic placeholder when the backend pre-dates
+            // the node_errors field (older uvicorn build).
+            const reason =
+              l2Status.node_errors?.[nodeId] ?? 'backend marked node FAILED (no error text persisted — check uvicorn console)';
+            failures.push({ asset_path: sourceAsset, reason });
           }
         }
       }
@@ -210,7 +215,8 @@ export async function runProjectScan(opts: ProjectScanOptions): Promise<ProjectS
       if (l1Status.status === 'FAILED') {
         failures.push({
           asset_path: '<L1 clustering>',
-          reason: 'backend L1 task FAILED — check uvicorn logs for parse/LLM errors',
+          reason: l1Status.error
+            ?? 'backend L1 task FAILED (no error text persisted — check uvicorn console)',
         });
       }
     }

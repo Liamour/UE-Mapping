@@ -103,6 +103,12 @@ export interface ScanStatus {
   failed_nodes: number;
   skipped_nodes: number;
   node_statuses: Record<string, string>;
+  // Per-node failure reasons keyed by node_id — populated for FAILED entries
+  // so the UI can show real diagnostics ("LLM call exhausted retries: rate
+  // limit", "Vault write: permission denied") instead of an opaque marker.
+  node_errors?: Record<string, string>;
+  // Task-level error (e.g. provider init failed before any node ran).
+  error?: string | null;
 }
 
 export class BackendUnreachableError extends Error {

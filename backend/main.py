@@ -336,6 +336,13 @@ class TaskStatusResponse(BaseModel):
     failed_nodes: int
     skipped_nodes: int = 0
     node_statuses: Dict[str, str] = {}
+    # Per-node failure reasons.  Populated only for FAILED entries — the
+    # exception message at the analyze_one_node level (LLM error / parse
+    # error / vault writer error).  Kept in a separate dict so the existing
+    # node_statuses contract stays a flat str→str map.
+    node_errors: Dict[str, str] = {}
+    # Task-level error (e.g. provider init failed before any node ran).
+    error: Optional[str] = None
 
 
 class WriteNotesRequest(BaseModel):
@@ -785,9 +792,15 @@ async def process_batch_ast_task(
                 completed += 1
 
         except Exception as e:
-            print(f"[SYS_ERR] Failed to process node {node.node_id}: {e}")
+            # Persist both the FAILED marker AND the actual exception text so
+            # the frontend can surface real diagnostics ("LLM call exhausted
+            # retries: rate limit", "Vault write: permission denied", etc.)
+            # instead of the opaque "backend marked node FAILED" placeholder.
+            err_text = f"{type(e).__name__}: {e}"[:1000]
+            print(f"[SYS_ERR] Failed to process node {node.node_id}: {err_text}")
             try:
                 await redis_client.hset(f"task:{task_id}:nodes", node.node_id, "FAILED")
+                await redis_client.hset(f"task:{task_id}:errors", node.node_id, err_text)
                 await redis_client.hincrby(f"task:{task_id}", "failed_nodes", 1)
             except Exception as inner:
                 print(f"[SYS_ERR] Could not record FAILED for {node.node_id}: {inner}")
@@ -1011,6 +1024,7 @@ async def get_task_status(task_id: str):
     if not task_data:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
     node_statuses = await redis_client.hgetall(f"task:{task_id}:nodes")
+    node_errors = await redis_client.hgetall(f"task:{task_id}:errors")
     return TaskStatusResponse(
         task_id=task_id,
         status=task_data.get("status", "PENDING"),
@@ -1019,6 +1033,8 @@ async def get_task_status(task_id: str):
         failed_nodes=int(task_data.get("failed_nodes", 0)),
         skipped_nodes=int(task_data.get("skipped_nodes", 0)),
         node_statuses=node_statuses or {},
+        node_errors=node_errors or {},
+        error=task_data.get("error"),
     )
 
 
