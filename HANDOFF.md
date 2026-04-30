@@ -1,8 +1,8 @@
 # AICartographer 项目交接文档
 
-> 最后更新：2026-04-30（A1 全链路打通 — Stale Asset Sync 6 项 user-bug fix 验证通过 → merge 回 master）
+> 最后更新：2026-04-30（Phase A 收官 — A2 Reflection 业务集成 + B narrative prompt 重写 + A3 Lv4 CallTrace 一气合成）
 > 这份文档把工程状态、架构、未完成任务一次性交给下一个 session。
-> **从下到上读**：§21 是最新（Stale Asset Sync 全链路 — frontend store + sync engine + 4 类事件 listener + 6 项 bug fix），§20（A1 + A2 桥接层），§18（资深 UE5 dev 审视 + 10 条 roadmap + 战略判断），§17（P0/P1/P2 验证 + 进度表），§16（worktree → main），§15（4 项功能 + 重构），§13/§14（中文化 + 互动叙事），§1-§12 是历史交接。**新 session 必读 §21.4（已知限制） + §21.5（下次起点） + §20.4 P2 / P3（A2/A3 仍 pending）。**
+> **从下到上读**：§22 是最新（A2+B+A3 — §18.4 战略赌注兑现完毕，Phase A 收官），§21（Stale Asset Sync 全链路 + 6 项 bug fix），§20（A1 + A2 桥接层），§18（资深 UE5 dev 审视 + 10 条 roadmap + 战略判断），§17（P0/P1/P2 验证 + 进度表），§16（worktree → main），§15（4 项功能 + 重构），§13/§14（中文化 + 互动叙事），§1-§12 是历史交接。**新 session 必读 §22.4（已知限制） + §22.5（下次起点）。Phase A 已全部落地，下一阶段是 Phase B（叙事质量验证 + LLM 输出对齐）或新 roadmap。**
 
 ---
 
@@ -1571,4 +1571,93 @@ eb84bf2 feat(stale): one-click apply rename + X→Y display + working navigation
 8 个 commit。`165e58a → 06c1b93 → eb84bf2 → fd6717d` 是 UI 三连迭代（红点 → 类型化 dropdown → rename apply → 全 4 类 apply），`d009116` 抽出 sync engine 并加自动化，`a2d3786` 把 C++ 端补全到 4 个 listener，`25824f3` 收尾 6 项实测 bug fix。中间 `780c954` 是路上撞到的小坑顺手修。
 
 最后这次 commit（HANDOFF §21）+ merge 回 master 是 session 收尾。
+
+---
+
+## 22. Session 2026-04-30（下半段·Phase A 收官）— A2 业务集成 + B prompt 重写 + A3 Lv4 CallTrace
+
+> §18.4 提出"去 LLM 抽取，留 LLM 叙事"的战略判断，至此**完整兑现**：A1 stale 已经 ship 并验证（§21），A2 桥接层早就就位（§20.2 commit `d742020`），这一段把 A2 的业务集成、B 的 prompt 重写、A3 Lv4 CallTrace 一并落地。Phase A roadmap 全部完成。
+
+### 22.1 落地范围
+
+#### A2 业务集成（commit `b8c2b07` — feat(scan): A2+B）
+
+**前端把 Reflection 数据穿入 scan payload + skeleton .md：**
+- `services/scanPayload.ts` — `ScanASTData` 加 `properties` / `function_flags` / `class_dependencies` 三个可选字段；`buildScanASTFromBridge` 接受可选 `BridgeAssetSummary` 参数，把 UFUNCTION flags 按函数名映射，properties 直接 mirror，class deps 拆 hard/soft/interfaces 三组
+- `services/projectScan.ts` — 新增 `enriching` phase + `enrichWithReflection` worker（与 deepscan 同 concurrency=8）；fingerprint 完跑第二轮 reflection，结果按 asset_path 装 Map 后传给 `buildScanNodeFromBridge`。Reflection 失败（asset 损坏 / 非 UClass）记 failure 但不阻塞 scan
+- `services/frameworkScan.ts` — 同样在 fingerprint 后跑 `collectReflectionSummaries`；`renderSkeletonMd` 多接受一个 reflection 参数，frontmatter 写出新的 `properties:` / `function_flags:` / `class_dependencies:` 三个 YAML 块。`syncSingleAsset`（stale 单资产重扫路径）也跑一次 reflection 保持一致
+
+**后端持久化 + 接收：**
+- `vault_writer.py::NodeRecord` 加 `properties` / `function_flags` / `class_dependencies` 三个字段；`_build_frontmatter` 在 components 之后写出对应块（filter 掉空 flag 列表 / 空 dep 数组）
+- `main.py::analyze_one_node` 从 `ast_data` 解析新字段（防御性类型检查 + 字符串化）→ NodeRecord
+- 新增 `_build_user_prompt(node)` —— 检测 ast_data 是否含 reflection 字段：有则用结构化 inventory（按函数 / property / component / interface / hard_refs / soft_refs / K2 edges 分块），无则降级到原 JSON 8000-char dump 路径。每节段有 `_MAX_ITEMS_PER_SECTION=64` 上限防止巨大 BP 撑爆 context
+
+#### B narrative prompt 重写（同 commit `b8c2b07`）
+
+**SYSTEM_PROMPT 的核心 contract 从「请抽 + 写」变为「结构已给，专心写」：**
+- 开头 explicit 说："STRUCTURE 已经由 C++ Reflection 给出，权威。你的工作是 NARRATE，不是 RE-EXTRACT"
+- ANTI-FABRICATION 规则：每个引用的 function / property / dispatcher / interface 名必须 verbatim 出现在 STRUCTURE 块里。若用户的 prompt 里没有，**不许编**
+- EXECUTION FLOW：要求 named entry point + 沿名称 trace（"BeginPlay → SpawnDefaultWeapon → Cast → broadcast OnWeaponEquipped → BP_HUD listens"）
+- MEMBER INTERACTIONS：每条 bullet 必须 reference inventory 里的 member by name，例子明确给出 Replicated/BlueprintCallable 等 flag 的引用方式
+- ARCHITECTURAL RISK：每个风险必须 tie to specific named member 或 edge（不再允许"可能有性能问题"这种泛泛之谈）
+- "STRUCTURE 显示 (none) 的小节，对应 MEMBER INTERACTIONS bullet 可省略 — 不要瞎填"
+
+#### A3 Lv4 CallTrace（commit `d5e5b87`）
+
+**后端 BFS endpoint：**
+- `GET /api/v1/calltrace?project_root&root_asset_path&max_depth&max_nodes&edge_types`
+- `_build_calltrace_index` walk vault `*.md`，建 asset_path → record + title → asset_path 两个索引（frontmatter edges 里 target 是 title，需要反查回 asset_path）
+- BFS：root_asset_path 入队 → 每层弹出读 frontmatter edges → 按 edge_types filter → 添加 nodes + edges → 子节点入队（前提：未 visited、未越界）
+- 守卫：`max_depth=3` 默认（clamp 8 上限）、`max_nodes=100` 默认（clamp 500 上限）；`truncated=true` 当 frontier 超过 max_nodes 时
+- 缺失节点（edge target 解析到 vault 不存在的资产）作为 `missing: true` 占位 node 返回，UI 灰显
+
+**前端 Lv4CallTrace.tsx + 注册：**
+- `LevelKind` 加 `'lv4'`；TabLocation 注释更新（`relativePath` 同时服务 lv2/lv3/lv4 的根 BP）
+- `Lv4CallTrace.tsx` —— 纯几何同心环：layer 0 → 中心，layer L → 半径 `max(L * 280, count_to_fit_radius)`。**没用 d3-force**（试过一版 force pin + collide，但破坏 concentric 语义；最终改纯几何）
+- Layer-N 节点按 primary parent 角度排序，让边自然辐射不交叉（cosmetic but 可读性显著提升）
+- Edge type filter chips —— 7 种类型可点击切换；filter 是 UI 端，chip toggle 不重新 fetch
+- 节点点击 → navigate Lv2；root 节点禁用拖拽（中心位置固定）；非 root 可拖
+- Lv2BlueprintFocus 加 `⊙ Call trace` 按钮（仅当 BP 有 outbound edges 时显示）
+- Breadcrumb 加 lv4 分支："Project › combat › BP_Player › call trace"
+- AppShell renderLevel 加 lv4 case
+
+### 22.2 命名记录
+
+§19.3 / §20.4 都把这个视图叫 "Lv5CallTrace"，但 lv0-lv3 才是当前已存在的层级，lv4 是自然下一格。所以实际命名为 **Lv4CallTrace** —— HANDOFF §22 起以 lv4 为准。
+
+### 22.3 用户必须做的事
+
+- **不需要重新 build C++ 插件** —— A2/B/A3 都不动 UFUNCTION。前端 vite build 已经 commit 进 `Plugins/AICartographer/Resources/WebUI/index.html`
+- **后端要重启 uvicorn** 才能 pick up 新 endpoint 和 prompt rewrite —— `cd backend && uvicorn main:app --reload`
+- **Lv4 CallTrace 依赖后端** —— bridge-only / HTTP 离线模式下 Lv4 会显示 `BackendOfflineCard`-风格的错误。这个是 design choice：BFS 算法在后端跑能保证 vault 数据一致，frontend 不重复 walk
+
+### 22.4 已知限制 / Tech debt
+
+- **Reflection 仅覆盖 BP fast-path** —— DataAsset / WBP / Niagara 现在 bridge 端会返回失败（ProjectScan failures 列表会列出这些），降级回纯 K2 walk。Phase B 扩 ClassPath filter 时一并解决
+- **A3 缺少"反向调用链"视图** —— 当前 BFS 是 outbound（"我调谁"），没做 inbound（"谁调我"）。后者技术上需要全 vault 边反向索引；写起来直接，但 §19.3 MVP 收口故意只做正向。下次按需求补
+- **Lv4 边没有 hover tooltip** —— 边上 label 是第一个 ref，但完整 refs 列表没暴露。后续可加 hover popover
+- **prompt 重写未做 A/B 测试** —— B 是基于「结构已给」假设写的，理论上应该让幻觉率明显下降；但**没在真实数据上验证过**。下次 session 跑一遍完整 L2 scan，对比 commit `b8c2b07` 前后的 .md 质量
+- **Reflection 数据没参与 ast_hash** —— `compute_ast_hash` 只 hash ast_data 字典；理论上 reflection 字段加进 ast_data 后 hash 会变，但 reflection 不变 / K2 变化的情况下 manifest 仍能 dedup。**不是 bug，是观察项**
+
+### 22.5 下次 session 起点
+
+Phase A roadmap 全部完成。下一阶段建议（按优先级）：
+
+1. **Phase B 验证** —— 跑一遍真实工程的完整 L2 scan，对比 prompt 重写前后的 5 段 ANALYSIS 质量。如果 ANTI-FABRICATION 没明显改善，可能要加自动化检测（post-LLM 扫描，把响应里出现但 inventory 里没有的名字标红 → backend 拒收 / 自动重 prompt 一次）
+2. **Lv4 inbound 反向调用链** —— "谁调我" 视图，对调试 hub BP 有用。需要后端反向边索引（一次性 walk，缓存到 _meta/calltrace_index.json，每次 scan 后失效重建）
+3. **跨语言 / 跨工程 vault 共享** —— 当前 vault 是 per-developer；如果团队想共享，需要把 stale 状态写回 frontmatter 而不是 localStorage（§21.5 P4）
+4. **Reflection 扩 ClassPath** —— DataAsset / Widget / Anim / Niagara 进 reflection；C++ 端改 filter（§20.2 MVP 收口未做）
+5. **Lv5（真的 Lv5）** —— 如果还有第 5 个有意义的视角，Lv4 之后还能再叠。当前没需求
+
+### 22.6 commit 记录（this session 下半段）
+
+```
+d5e5b87 feat(graph): A3 — Lv4 cross-BP CallTrace (concentric BFS view)
+b8c2b07 feat(scan): A2+B — wire Reflection summary into LLM scan, rewrite narrative prompt
+92f12cb docs(handoff): §21 — Stale Asset Sync 全链路打通 + 6 项 user-bug fix
+```
+
+3 个 commit + 这次 §22 = 4 commit。`b8c2b07` 是 §18.4 的核心赌注（A2 业务 + B prompt），`d5e5b87` 是 Phase A 最后一个新视图。
+
+至此 Phase A 落地完毕：A1（stale sync）→ A2（reflection 持久化 + LLM 接管）→ A3（Lv4 CallTrace）→ B（叙事 prompt）。后续按 §22.5 决定下一阶段。
 
