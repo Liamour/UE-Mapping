@@ -123,20 +123,33 @@ private:
     struct FStaleEvent
     {
         int64   Counter = 0;
-        FString Type;          // "renamed" | "removed" | (later) "added" | "updated"
+        FString Type;          // "renamed" | "removed" | "added" | "updated"
         FString Path;
         FString OldPath;
         double  TimestampSec = 0;
     };
     bool bAssetRegistryListenersRegistered = false;
+    // OnAssetAdded fires for every asset already on disk during editor
+    // startup ("seed" events).  We gate `added` event recording on the
+    // OnFilesLoaded callback so the seed pass doesn't dump thousands of
+    // bogus "added" entries into the buffer.  Renames / removes are
+    // legitimate from the moment the editor runs them, so they aren't
+    // gated.  See HandleAssetAdded + HandleFilesLoaded.
+    bool bInitialAssetsLoaded = false;
     int64 StaleEventCounter = 0;
     TArray<FStaleEvent> StaleEventBuffer;
     FDelegateHandle OnAssetRenamedHandle;
     FDelegateHandle OnAssetRemovedHandle;
+    FDelegateHandle OnAssetAddedHandle;
+    FDelegateHandle OnAssetUpdatedOnDiskHandle;
+    FDelegateHandle OnFilesLoadedHandle;
 
     void EnsureAssetRegistryListenersRegistered();
     void HandleAssetRenamed(const struct FAssetData& AssetData, const FString& OldObjectPath);
     void HandleAssetRemoved(const struct FAssetData& AssetData);
+    void HandleAssetAdded(const struct FAssetData& AssetData);
+    void HandleAssetUpdatedOnDisk(const struct FAssetData& AssetData);
+    void HandleFilesLoaded();
 
     // 节点净化为AST JSON格式
     TSharedPtr<class FJsonObject> PurifyNodeToAST(class UEdGraphNode* Node);

@@ -1256,10 +1256,53 @@ TSharedPtr<FJsonObject> UAICartographerBridge::PurifyNodeToAST(UEdGraphNode* Nod
 
 
 // ─── A1: AssetRegistry stale-asset listener (HANDOFF §19.3) ─────────────────
-// Lazy-init pattern: register on first GetStaleEventsSince call.  Drop the
-// pre-init events (~30s window after editor open) — Phase A1 MVP accepts this.
-// AddUObject keeps a weak ref; UE auto-invalidates the binding when this
-// UObject is destroyed, so no explicit BeginDestroy unregister is required.
+// Lazy-init pattern: register on first GetStaleEventsSince call.  AddUObject
+// keeps a weak ref; UE auto-invalidates the binding when this UObject is
+// destroyed, so no explicit BeginDestroy unregister is required.
+//
+// Four event types are tracked: renamed / removed / added / updated.
+//   • renamed + removed go straight in (user-driven from frame 1)
+//   • added  is GATED on OnFilesLoaded — the registry fires OnAssetAdded
+//     for every asset already on disk at startup; without the gate we'd
+//     flood the buffer with thousands of "added" entries the user never
+//     caused.  Once the registry signals it's done loading, the gate
+//     opens and subsequent OnAssetAdded events are real user creations.
+//   • updated comes from OnAssetUpdatedOnDisk (UE 5.3+) — fires after a
+//     save, exactly what "the user changed this asset" means.
+
+namespace
+{
+    // Same accepted set used by ListBlueprintAssets / RequestDeepScan —
+    // we only flag stale events for assets the rest of the pipeline can
+    // process.  Filtering noise (textures / sounds / static meshes / ...)
+    // here keeps the badge meaningful.
+    static const TSet<FName>& BlueprintLikeClassNames()
+    {
+        static const TSet<FName> Set = {
+            FName("Blueprint"),
+            FName("WidgetBlueprint"),
+            FName("EditorUtilityWidgetBlueprint"),
+            FName("AnimBlueprint"),
+            FName("BlueprintFunctionLibrary"),
+            FName("BlueprintMacroLibrary"),
+        };
+        return Set;
+    }
+
+    static bool IsBlueprintLikeAsset(const FAssetData& AssetData)
+    {
+        if (!AssetData.IsValid()) return false;
+        return BlueprintLikeClassNames().Contains(AssetData.AssetClassPath.GetAssetName());
+    }
+
+    // Restrict to /Game/ — engine, plugin, and developer transient assets
+    // shouldn't surface as "the project changed".
+    static bool IsGameContentPath(const FAssetData& AssetData)
+    {
+        const FString PackageName = AssetData.PackageName.ToString();
+        return PackageName.StartsWith(TEXT("/Game/"));
+    }
+}
 
 void UAICartographerBridge::EnsureAssetRegistryListenersRegistered()
 {
@@ -1268,15 +1311,33 @@ void UAICartographerBridge::EnsureAssetRegistryListenersRegistered()
     FAssetRegistryModule& Module = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
     IAssetRegistry& Registry = Module.Get();
 
-    OnAssetRenamedHandle = Registry.OnAssetRenamed().AddUObject(this, &UAICartographerBridge::HandleAssetRenamed);
-    OnAssetRemovedHandle = Registry.OnAssetRemoved().AddUObject(this, &UAICartographerBridge::HandleAssetRemoved);
+    OnAssetRenamedHandle         = Registry.OnAssetRenamed().AddUObject(this, &UAICartographerBridge::HandleAssetRenamed);
+    OnAssetRemovedHandle         = Registry.OnAssetRemoved().AddUObject(this, &UAICartographerBridge::HandleAssetRemoved);
+    OnAssetAddedHandle           = Registry.OnAssetAdded().AddUObject(this, &UAICartographerBridge::HandleAssetAdded);
+    OnAssetUpdatedOnDiskHandle   = Registry.OnAssetUpdatedOnDisk().AddUObject(this, &UAICartographerBridge::HandleAssetUpdatedOnDisk);
+
+    // OnFilesLoaded only fires once (when the initial scan completes).
+    // If we registered AFTER the registry already finished loading, the
+    // delegate won't fire — but in that case IsLoadingAssets() is false
+    // and we can flip the gate immediately.
+    if (Registry.IsLoadingAssets())
+    {
+        OnFilesLoadedHandle = Registry.OnFilesLoaded().AddUObject(this, &UAICartographerBridge::HandleFilesLoaded);
+        UE_LOG(LogTemp, Log, TEXT("[BRIDGE] AssetRegistry still loading — added events gated until OnFilesLoaded"));
+    }
+    else
+    {
+        bInitialAssetsLoaded = true;
+        UE_LOG(LogTemp, Log, TEXT("[BRIDGE] AssetRegistry already finished loading — added events live immediately"));
+    }
 
     bAssetRegistryListenersRegistered = true;
-    UE_LOG(LogTemp, Log, TEXT("[BRIDGE] AssetRegistry stale listeners registered (renamed + removed)"));
+    UE_LOG(LogTemp, Log, TEXT("[BRIDGE] AssetRegistry stale listeners registered (renamed + removed + added + updated)"));
 }
 
 void UAICartographerBridge::HandleAssetRenamed(const FAssetData& AssetData, const FString& OldObjectPath)
 {
+    if (!IsBlueprintLikeAsset(AssetData) || !IsGameContentPath(AssetData)) return;
     StaleEventCounter++;
     FStaleEvent Ev;
     Ev.Counter = StaleEventCounter;
@@ -1293,6 +1354,7 @@ void UAICartographerBridge::HandleAssetRenamed(const FAssetData& AssetData, cons
 
 void UAICartographerBridge::HandleAssetRemoved(const FAssetData& AssetData)
 {
+    if (!IsBlueprintLikeAsset(AssetData) || !IsGameContentPath(AssetData)) return;
     StaleEventCounter++;
     FStaleEvent Ev;
     Ev.Counter = StaleEventCounter;
@@ -1304,6 +1366,52 @@ void UAICartographerBridge::HandleAssetRemoved(const FAssetData& AssetData)
     {
         StaleEventBuffer.RemoveAt(0);
     }
+}
+
+void UAICartographerBridge::HandleAssetAdded(const FAssetData& AssetData)
+{
+    // Gate: ignore the seed wave during initial registry scan.  Once
+    // OnFilesLoaded has fired (or we registered post-load) every
+    // OnAssetAdded is a genuine user creation.
+    if (!bInitialAssetsLoaded) return;
+    if (!IsBlueprintLikeAsset(AssetData) || !IsGameContentPath(AssetData)) return;
+    StaleEventCounter++;
+    FStaleEvent Ev;
+    Ev.Counter = StaleEventCounter;
+    Ev.Type = TEXT("added");
+    Ev.Path = AssetData.GetObjectPathString();
+    Ev.TimestampSec = FPlatformTime::Seconds();
+    StaleEventBuffer.Add(Ev);
+    if (StaleEventBuffer.Num() > 1024)
+    {
+        StaleEventBuffer.RemoveAt(0);
+    }
+}
+
+void UAICartographerBridge::HandleAssetUpdatedOnDisk(const FAssetData& AssetData)
+{
+    // Filter same as add/remove — only Blueprints under /Game/.  Note we
+    // don't gate on bInitialAssetsLoaded here: OnAssetUpdatedOnDisk fires
+    // ONLY for actual save events, not initial-scan registration, so it's
+    // safe from the moment the listener is registered.
+    if (!IsBlueprintLikeAsset(AssetData) || !IsGameContentPath(AssetData)) return;
+    StaleEventCounter++;
+    FStaleEvent Ev;
+    Ev.Counter = StaleEventCounter;
+    Ev.Type = TEXT("updated");
+    Ev.Path = AssetData.GetObjectPathString();
+    Ev.TimestampSec = FPlatformTime::Seconds();
+    StaleEventBuffer.Add(Ev);
+    if (StaleEventBuffer.Num() > 1024)
+    {
+        StaleEventBuffer.RemoveAt(0);
+    }
+}
+
+void UAICartographerBridge::HandleFilesLoaded()
+{
+    bInitialAssetsLoaded = true;
+    UE_LOG(LogTemp, Log, TEXT("[BRIDGE] AssetRegistry initial scan complete — added events now live"));
 }
 
 FString UAICartographerBridge::GetStaleEventsSince(int64 SinceCounter)
