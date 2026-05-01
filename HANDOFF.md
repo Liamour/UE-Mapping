@@ -1,8 +1,8 @@
 # AICartographer 项目交接文档
 
-> 最后更新：2026-04-30（Phase A 收官 — A2 Reflection 业务集成 + B narrative prompt 重写 + A3 Lv4 CallTrace 一气合成）
+> 最后更新：2026-05-01（Phase B #2 — Anthropic prompt cache + data-only 模板化，单次 scan 成本预计 ~20w → ~5–8w token）
 > 这份文档把工程状态、架构、未完成任务一次性交给下一个 session。
-> **从下到上读**：§22 是最新（A2+B+A3 — §18.4 战略赌注兑现完毕，Phase A 收官），§21（Stale Asset Sync 全链路 + 6 项 bug fix），§20（A1 + A2 桥接层），§18（资深 UE5 dev 审视 + 10 条 roadmap + 战略判断），§17（P0/P1/P2 验证 + 进度表），§16（worktree → main），§15（4 项功能 + 重构），§13/§14（中文化 + 互动叙事），§1-§12 是历史交接。**新 session 必读 §22.4（已知限制） + §22.5（下次起点）。Phase A 已全部落地，下一阶段是 Phase B（叙事质量验证 + LLM 输出对齐）或新 roadmap。**
+> **从下到上读**：§24（Phase B #2 成本优化，本次），§23（Phase B #1 Reflection 扩 DataTable + UDataAsset），§22（Phase A 收官），§21（Stale Asset Sync），§20（A1 + A2 桥接层），§18（roadmap + 战略），§17（P0/P1/P2），§16（worktree → main），§13/§14/§15 早期，§1-§12 历史。**新 session 必读 §24.5（user 必做事项） + §24.7（下一阶段）。**
 
 ---
 
@@ -1754,4 +1754,149 @@ TBD feat(scan/Phase-B-1): extend Reflection to DataTable + UDataAsset subclasses
 2. **Phase B #3: Niagara**（独立 commit，需 `Build.cs` 改）
 3. **Phase B #4: Anti-fab guard**（§22.5 #1）—— 跑过 23.5 验证后如果叙事仍出现 inventory 外的名字，就上自动检测
 4. **Phase C: RAG 问答**（§18.6 阶段 C1）—— 真正解锁日常使用场景。bge-m3 + structure-aware chunks + reranker + tool-calling，前 3 块是 RAG 工程，第 4 块是产品架构（详见上一段聊天记录）
+
+---
+
+## 24. Session 2026-05-01 — Phase B #2: 成本优化（Anthropic prompt cache + 数据资产模板化）
+
+> 用户反馈每次 verification scan 烧 ~20w token。诊断后两条路：(1) ClaudeProvider 没开 Anthropic Prompt Caching，SYSTEM_PROMPT (~3500 tok × 90 个节点) 在白白重发；(2) DataAsset/DataTable 这类 data-only 资产的 LLM 输出永远是「Data-only asset — no execution flow」模板，烧 token 没意义。这一段把这两条优化一刀打掉。
+
+### 24.1 落地清单
+
+#### `backend/llm_providers.py::ClaudeProvider.analyze`
+
+- `system` 字段从 `str` 改为 `[{"type":"text","text":..., "cache_control":{"type":"ephemeral"}}]` —— 让 Anthropic 自动缓存 system prompt，5 分钟 TTL
+- `extra` 字段新增 `cache_creation_input_tokens` / `cache_read_input_tokens` —— 把缓存命中数据透传给上层，方便 audit
+- 顺手 bug fix：原来 `thinking_tokens` 错误地等于 `cache_creation_input_tokens`（语义错），改为 0（Anthropic SDK 不单独暴露 thinking tokens，已经包含在 `output_tokens` 里）
+
+#### `backend/main.py::analyze_one_node`
+
+- 新增 `_DATA_ONLY_NODE_TYPES = {"DataAsset", "DataTable"}` + 新 helper `_build_data_only_parsed(node)` 生成模板化 `parsed` dict —— 跳过 LLM 调用，直接拼 markdown
+- `analyze_one_node` 入口判断 `node.node_type` 是否 data-only，是则走模板路径，不是则正常 LLM 调用
+- 模板路径合成一个 `LLMResponse(tokens_in=0, tokens_out=0, model="(template)")`，下游（vault_writer / batch worker）零改动
+- LLM 路径后新增 `[CACHE]` 日志，把 `cache_read` / `cache_create` / `tokens_in` / `tokens_out` 都打出来
+- 模板路径打 `[DATA_ONLY_TEMPLATE]` 日志，便于统计省了多少次 LLM 调用
+
+### 24.2 预期节省（Cropout 项目，~90 个节点 / scan）
+
+| 优化项 | 改前 | 改后 | 节省 |
+| --- | --- | --- | --- |
+| SYSTEM_PROMPT 重发（~3500 tok × 90） | ~315k input | ~35k input（首次 1.25× 写入 + 89 次 0.10× 读取） | **~89%** |
+| Data-only 资产 LLM 调用（~14 次 × 2k tok） | ~28k mixed | 0 | **100%** |
+| 总体单次 full scan 估算 | ~20w token | **~5–8w token** | **~60–75%** |
+
+数字以「全量重扫」为基准；增量扫描（AST hash 命中）继续不调 LLM，本身已是 0 成本。
+
+### 24.3 验证方法
+
+跑完 framework scan + LLM analysis 后，看 uvicorn 控制台：
+
+- **`[CACHE]` 日志**：第一条节点应显示 `cache_create=~3500, cache_read=0`，从第二条开始应该是 `cache_create=0, cache_read=~3500`。如果第二条之后 `cache_read` 仍然是 0，说明有「静默失效因子」（system prompt 里嵌了 timestamp / UUID / 不稳定 JSON / 工具集变了等）—— 参考 `shared/prompt-caching.md` 的 silent-invalidator 审计表
+- **`[DATA_ONLY_TEMPLATE]` 日志**：DT_*/IA_*/IMC_* 应该全部走这条路，不会出现在 `[CACHE]` 日志里
+- **token 总账**：scan 结束后看 LLM provider 控制台 / 钱包，应该看到 input token 数显著下降
+
+### 24.4 已知限制 / 边界条件
+
+- **VolcengineProvider 没动**：Volcengine（Doubao）的 OpenAI-compatible 接口对 prompt caching 的支持取决于具体模型，需要单独验证。当前用户主要用 Volcengine 时，省的是 P1（data-only）那部分。如果用户切到 Claude，P0 + P1 双重生效
+- **Claude 模型最低缓存 prefix 阈值**：Sonnet 4.6 是 2048 tokens，Opus / Haiku 4.x 是 4096 tokens。SYSTEM_PROMPT ~3500 tok 在 Sonnet 上稳过线，在 Opus / Haiku 上**不稳**——如果用户切到这两类模型，可能看到 `cache_creation_input_tokens` 一直是 0（静默不缓存）。届时方案是把 tools / 其它静态前缀也纳入 cached prefix 凑过 4096
+- **5 分钟 TTL**：典型 batch scan 90 个节点 < 5 分钟跑完，TTL 够用；但单节点 scan（`/scan/single` endpoint）每次都是 cold cache，永远是 cache_create 不是 cache_read。这是设计行为，不是 bug
+- **Data-only 模板的 INTENT 不引用 title**：写死「Static row table read by callers via DataTable RowMap...」这种通用语，不会写「DT_Jobs 是村民职业表」之类的具体描述。后者需要 LLM 根据列结构推断。如果用户希望 data asset 有更具体叙事，未来可以加一条「小表（< 50 rows）允许 LLM dump rows」的 opt-in 路径
+
+### 24.5 user 必须做的事
+
+- **重启 uvicorn** —— `llm_providers.py` 和 `main.py` 都改了
+- **不必重 build C++ 插件** —— 全后端改动
+- **下次 scan 时观察控制台** —— 应该看到 `[CACHE]` + `[DATA_ONLY_TEMPLATE]` 日志开始刷
+- **如果用 Claude 模型**：直接生效。如果用 Volcengine：只有 P1（data-only 模板）生效，P0（prompt cache）需要 Volcengine 自己支持
+
+### 24.6 commit 待打
+
+```
+TBD perf(scan): cut LLM cost via Anthropic prompt cache + data-only template
+```
+
+单 commit 包：`llm_providers.py` (cache_control + cache hit telemetry) + `main.py` (data-only short-circuit + [CACHE] / [DATA_ONLY_TEMPLATE] 日志) + 本 §24。
+
+### 24.7 下一阶段建议
+
+按 §22.5 / §23.7 剩余优先级：
+
+1. ~~**anti-fab guard 验证**（§22.5 #1）~~ —— 已落地，详见 §25
+2. **Phase B #3: Lv4 inbound 反向调用链**（「谁调我」）—— 顺势工程，§23.7 推荐
+3. **Phase B #4: Niagara**（独立 commit，需 `Build.cs` 改）
+4. **IA / IMC vault 支持** —— C++ bridge 改动，已有 spawn task 文档；需要重编插件
+5. **Phase C: RAG 问答** —— 已有 §18.6 / 上次聊天的工程方案
+
+---
+
+## §25 Anti-fabrication audit — production-ready 门槛已通过（2026-05-02）
+
+> 一句话：**163 个引用、0 个编造，fabrication rate 0.00%**。L1 narrative 进入商用门槛。
+
+### 25.1 背景
+
+§22.5 #1 / §24.7 #1 列的"叙事可信度验证"是 Phase B 收官的最后未兑现项。本次会话用 `claude-sonnet-4-6` 通过 OpenAI-compat 代理跑完 Cropout demo 全量 L2 + L1 后，写了一个独立审计脚本对 16 个 system narrative 做静态校验。
+
+### 25.2 审计工具
+
+`backend/audit_vault.py` —— 只读、零依赖侧链（除 PyYAML）、可独立运行。CLI：
+
+```bash
+python backend/audit_vault.py <project_root> [--out vault-audit.md] [--json audit.json]
+```
+
+工作流程：
+
+1. 走 `vault/Systems/*.md`，按 frontmatter 拆出每个 system 的 LLM narrative 段（`## [ Members ]` 之前的部分）
+2. 用 `BACKTICK_IDENT_RE` 抓所有反引号包裹的标识符 + `MD_LINK_NAME_RE` 抓 `[Name](path)` 形式
+3. 按 UE 命名约定前缀（`BP_` / `BPI_` / `ABP_` / `BTT_` / `EQC_` / `UI_` / `IM_` / ...）过滤出资产引用，丢弃控制词表 token（`function_call` / `nominal` / `actor` 等）
+4. 每个引用按命中分桶：
+   - **in_scope**：在本 system 的 member 列表里（vault frontmatter `tags: [system/X]` 反查）
+   - **out_of_scope**：在 vault 但不属于本 system —— 跨系统引用，EXTERNAL COUPLING 段允许
+   - **fabricated**：vault 完全找不到 —— 凭空编造，**这才是必须为 0 的指标**
+
+### 25.3 首次审计结果（Cropout，claude-sonnet-4-6）
+
+| 指标 | 值 |
+|---|---:|
+| 扫描 system | 16 |
+| 总引用数 | 163 |
+| **凭空编造** | **0** |
+| 跨系统引用 | 50 |
+| **fabrication rate** | **0.00%** |
+| 判定 | **production-ready (< 1%)** |
+
+50 个 OOS 集中在接口（`BPI_GI` / `BPI_Resource` / `BPI_Villager` / `BPI_Player`）和 hub 类（`BP_GI` / `BP_GM` / `BP_Interactable`），都是合法跨系统消费——不是 bug。
+
+唯一可疑：`characters` 系统 3 member 全 OOS，说明 vault 里 `ABP_*` 没打 `#system/characters` tag，membership vocab 对不齐。这是 vocab 路径 fallback 的边界 case，不是编造。
+
+### 25.4 为什么 0 编造能成立
+
+回头看保护链路：
+
+1. **L1_SYSTEM_SCOPED_PROMPT** 的 ANTI-FABRICATION 硬约束（main.py：「every member name / edge target you reference MUST appear verbatim in the input. Don't invent.」）
+2. **L2 → L1 数据流不送 vault 之外的资产**：`analyze_one_system_l1` 用 `collect_l2_metadata` 过滤 system_id，LLM 物理上看不到不存在的 BP
+3. **Phase A2 reflection 替代 K2 dump**：结构性字段（exports / properties / class_dependencies）由 C++ 反射直出，LLM 不再被迫从 K2 节点字符串里"猜"函数名
+
+三层叠加，凭空编造的物理空间几乎为零。剩下的只有"LLM 在 INTERNAL CALL FLOW 里写了一句不存在的函数调用关系"——这是函数级而非资产级的 hallucination，需要更深一层的审计（见 25.6）。
+
+### 25.5 怎么用这个工具
+
+- **每次跑完 L1 batch 后跑一次** `python backend/audit_vault.py .` —— 30 秒出报告
+- **生产前检查**：fab rate ≥ 1% 就回头查 prompt 或换模型
+- **跨项目对比**：把 `--json` 输出存档，能看 fab rate 在不同项目 / 不同模型下的趋势
+- **审计输出文件**（`vault-audit.md` / `vault-audit.json`）刻意不入库——是项目特定的产物，类似测试报告，跑一次生成一次
+
+### 25.6 后续可选升级
+
+不阻塞 Phase B 收尾，但有需要可以做：
+
+1. **函数名级别审计**：抽取 `BP_X.FuncName` 模式，反查那个 BP 的 `exports.functions` / `events` / `dispatchers`。fuzzy 但能逮住"叙事里说 BP_Foo.Bar 但 Bar 不在 exports"这种 case
+2. **CI 集成**：把 `audit_vault.py` 接进 GitHub Actions，PR 修改 prompt / 模型时自动比对前后 fab rate
+3. **跨项目基线**：在多个 UE 项目上跑，建立"不同复杂度项目的 fab rate 上限"经验值
+4. **可视化**：vault-audit.md 现在是表格 + 列表，可以加个简单的 HTML 直方图
+
+### 25.7 commit
+
+`feat(audit): static fabrication check for L1 system narratives` —— 加 `backend/audit_vault.py` 单文件 + 本 §25 + `.gitignore` 屏蔽 `vault-audit.{md,json}` 输出。
 

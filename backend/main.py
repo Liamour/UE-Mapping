@@ -312,6 +312,7 @@ OUTPUT — produce TWO sections in this exact order, no preamble:
   "title": "<2-4 word human-readable title, e.g. 'Combat Loop'>",
   "intent": "<one sentence describing what runtime problem this system OWNS>",
   "system_risk_level": "<nominal | warning | critical>",
+  "hub": "<asset_path of THE central blueprint that other members converge on, OR null if the system has no clear hub (e.g. a flat collection of independent helpers)>",
   "external_dependencies": [
     {"target_system": "<other system tag the L2 vocab uses>",
      "via": "function_call | spawn | listens_to | interface_call | cast",
@@ -409,11 +410,13 @@ class ProviderConfig(BaseModel):
     The frontend stores this in localStorage and ships it with every scan
     request.  We build the provider, run the call, and discard the dict.
     """
-    provider: Literal["volcengine", "claude"]
+    provider: Literal["volcengine", "claude", "openai_compat"]
     api_key: str
     endpoint: Optional[str] = None       # volcengine: model endpoint id (ep-...)
     model: Optional[str] = None          # claude: short name or canonical id
+                                          # openai_compat: arbitrary model id
     effort: Optional[str] = None         # claude: low|medium|high|extra_high|max
+    base_url: Optional[str] = None       # openai_compat: full /v1 base URL
     concurrency: Optional[int] = None    # batch worker pool size override
     language: Optional[Literal["en", "zh"]] = None  # narrative output language
 
@@ -471,6 +474,81 @@ class WriteNotesRequest(BaseModel):
 _METADATA_RE = re.compile(r"\[METADATA\](.*?)\[/METADATA\]", re.DOTALL)
 _ANALYSIS_RE = re.compile(r"\[ANALYSIS\](.*?)\[/ANALYSIS\]", re.DOTALL)
 
+
+def _strip_md_fences(text: str) -> str:
+    """Remove markdown code fences (``` and ```json) from anywhere in a
+    string.  Used both as a pre-filter and to clean fence-wrapped JSON
+    that some models put INSIDE [METADATA]...[/METADATA] tags."""
+    text = re.sub(r"```[a-zA-Z]*\s*\n", "", text)
+    text = re.sub(r"\n```", "", text)
+    return text.strip()
+
+
+def _extract_metadata_block(raw: str) -> Optional[str]:
+    """Find a JSON METADATA block in an LLM response, tolerating the four
+    most common formatting deviations we've seen in the wild from
+    OpenAI-compatible providers (DeepSeek, Qwen, Claude-via-LiteLLM, …):
+
+    1) Strict ``[METADATA]...[/METADATA]`` form (what the prompt asks for).
+    2) The same form, but with markdown code fences INSIDE the tags —
+       i.e. ``[METADATA]\\n```json\\n{...}\\n```\\n[/METADATA]``.  Common
+       output shape from Claude when asked for structured JSON inside a
+       human-readable wrapper; the model treats the JSON as "code" and
+       fences it.
+    3) The whole METADATA block wrapped in code fences from the outside
+       (``` ```json\\n[METADATA]...[/METADATA]\\n``` ```).
+    4) Tags dropped entirely — model just emits the bare JSON object.
+
+    Returns the JSON-text (suitable for ``json.loads``) or ``None`` when
+    nothing parse-worthy turns up.
+    """
+    # (1) Strict tags — but ALWAYS strip fences from the captured content
+    #     before returning.  This solves case (2) above: a model that puts
+    #     ```json…``` INSIDE [METADATA]…[/METADATA] would previously match
+    #     here and immediately fail json.loads on the fence chars.
+    m = _METADATA_RE.search(raw)
+    if m:
+        return _strip_md_fences(m.group(1))
+
+    # (3) Strip outer fences and retry.
+    cleaned = _strip_md_fences(raw)
+    m = _METADATA_RE.search(cleaned)
+    if m:
+        return _strip_md_fences(m.group(1))
+
+    # (3) Bare-JSON fallback — find the first balanced {...} that parses.
+    start = cleaned.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(cleaned)):
+        c = cleaned[i]
+        if esc:
+            esc = False
+            continue
+        if c == "\\":
+            esc = True
+            continue
+        if c == '"':
+            in_str = not in_str
+            continue
+        if in_str:
+            continue
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                cand = cleaned[start:i + 1]
+                try:
+                    json.loads(cand)
+                    return cand
+                except json.JSONDecodeError:
+                    return None
+    return None
+
 # Allowed system axis values — must stay in sync with the SYSTEM_PROMPT
 # vocabulary block.  Used as a guard against weak LLMs that hallucinate tag
 # values like "blueprint" or "core" that aren't in the controlled list.
@@ -487,12 +565,12 @@ def parse_llm_response(raw: str) -> Dict[str, Any]:
         "intent": None, "tags": [], "risk_level": "nominal",
         "analysis_markdown": raw, "parse_ok": False,
     }
-    md_match = _METADATA_RE.search(raw)
+    md_text = _extract_metadata_block(raw)
     body_match = _ANALYSIS_RE.search(raw)
 
-    if md_match:
+    if md_text:
         try:
-            md_obj = json.loads(md_match.group(1).strip())
+            md_obj = json.loads(md_text)
             out["intent"] = md_obj.get("intent")
             risk = (md_obj.get("risk_level") or "nominal").lower()
             if risk not in ("nominal", "warning", "critical"):
@@ -545,10 +623,15 @@ class LLMRetryableError(Exception):
     stop=stop_after_attempt(RETRY_ATTEMPTS),
     reraise=True,
 )
-async def _call_with_retry(provider: LLMProvider, system_prompt: str, user_prompt: str) -> LLMResponse:
+async def _call_with_retry(
+    provider: LLMProvider,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 4096,
+) -> LLMResponse:
     try:
         return await asyncio.wait_for(
-            provider.analyze(system_prompt, user_prompt),
+            provider.analyze(system_prompt, user_prompt, max_tokens=max_tokens),
             timeout=PER_NODE_TIMEOUT,
         )
     except asyncio.TimeoutError as e:
@@ -561,10 +644,22 @@ async def _call_with_retry(provider: LLMProvider, system_prompt: str, user_promp
         raise
 
 
-async def call_llm(provider: LLMProvider, system_prompt: str, user_prompt: str) -> LLMResponse:
-    """Call the provider with retry + timeout.  Non-retryable errors propagate."""
+async def call_llm(
+    provider: LLMProvider,
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 4096,
+) -> LLMResponse:
+    """Call the provider with retry + timeout.  Non-retryable errors propagate.
+
+    `max_tokens` defaults to 4096 — sufficient for L2 single-blueprint
+    analysis.  L1 system synthesis runs longer (multi-BP narrative + larger
+    METADATA payload) AND reasoning models (DeepSeek-R1, o1, QwQ) burn
+    additional tokens on chain-of-thought before the final answer; callers
+    in those paths should pass max_tokens=8192 or higher.
+    """
     try:
-        return await _call_with_retry(provider, system_prompt, user_prompt)
+        return await _call_with_retry(provider, system_prompt, user_prompt, max_tokens=max_tokens)
     except RetryError as e:
         # Surface the underlying cause for cleaner error messages.
         cause = e.last_attempt.exception() if e.last_attempt else e
@@ -577,6 +672,80 @@ async def call_llm(provider: LLMProvider, system_prompt: str, user_prompt: str) 
 # and return the parsed result.  No Redis state mutation here.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# §24 cost optimization #2 — data-only assets (DataTable, UDataAsset subclasses)
+# never have a meaningful execution flow.  Their answer to the LLM prompt is
+# always some variant of "Data-only asset — no execution flow" (see the
+# DATA-ONLY ASSETS clause in SYSTEM_PROMPT).  Burning ~2k tokens per call to
+# get a templated answer is wasteful — short-circuit with a deterministic
+# template instead.  Saves ~14 LLM calls × ~2k tokens = ~28k tokens per full
+# Cropout scan, on top of the prompt-cache savings.
+#
+# When this short-circuit fires we log [DATA_ONLY_TEMPLATE] so cost auditing
+# can see how many calls were saved per scan run.
+
+# Vocabulary used by the templated analysis_markdown — matches the
+# `node_type → role` mapping in SYSTEM_PROMPT's controlled list.
+_DATA_ONLY_NODE_TYPES = frozenset({"DataAsset", "DataTable"})
+
+
+def _build_data_only_parsed(node: ASTNodePayload) -> Dict[str, Any]:
+    """Build a templated `parsed` dict for a data-only asset, matching the
+    shape `parse_llm_response` would return on a successful LLM run.
+
+    System tag is intentionally left empty — the path-derived fallback below
+    fills it the same way it would for a real LLM response with a missing
+    `#system/...`, so DT_Jobs still ends up under the right system bucket.
+    """
+    is_table = node.node_type == "DataTable"
+    role = "data-table" if is_table else "data-asset"
+
+    if is_table:
+        intent = (
+            f"Static row table read by callers via DataTable RowMap at runtime; "
+            f"no execution flow."
+        )
+        flow = (
+            "Data-only asset — no execution flow. Rows are read by callers "
+            "via `UDataTable::FindRow` / `GetRowMap` at runtime."
+        )
+    else:
+        intent = (
+            f"Data asset providing static configuration; read by callers via "
+            f"the CDO at runtime; no execution flow."
+        )
+        flow = (
+            "Data-only asset — no execution flow. The CDO is loaded by callers "
+            "(typically through `TSoftObjectPtr` resolution or direct hard ref) "
+            "and its properties are read at runtime."
+        )
+
+    markdown = (
+        f"### [ INTENT ]\n{intent}\n\n"
+        f"### [ EXECUTION FLOW ]\n{flow}\n\n"
+        f"### [ MEMBER INTERACTIONS ]\n"
+        f"Refer to the Properties block below for the data shape; this asset "
+        f"has no functions, events, or dispatchers (data-only).\n\n"
+        f"### [ EXTERNAL COUPLING ]\n"
+        f"Consumed by external systems via `hard_ref` — see `hard_refs` in the "
+        f"frontmatter for outbound references this asset declares; the inbound "
+        f"side (who reads this asset) is surfaced via Lv4 CallTrace once "
+        f"reverse-edge indexing lands.\n\n"
+        f"### [ ARCHITECTURAL RISK ]\nNo notable risks.\n"
+    )
+
+    # `tags` only carries layer + role here.  System tag is added by the
+    # path-derived fallback in analyze_one_node — same code path the LLM
+    # response takes when the model fails to emit a `#system/...`.
+    return {
+        "intent": intent,
+        "tags": [f"#layer/data", f"#role/{role}"],
+        "risk_level": "nominal",
+        "analysis_markdown": markdown,
+        "parse_ok": True,
+        "had_system_tag": False,
+    }
+
+
 async def analyze_one_node(
     provider: LLMProvider,
     node: ASTNodePayload,
@@ -586,8 +755,47 @@ async def analyze_one_node(
     """Returns: {parsed: ..., write_result: {...} | None, llm_response: LLMResponse}"""
     user_prompt = _build_user_prompt(node)
     system_prompt = _apply_language(SYSTEM_PROMPT, language)
-    llm_response = await call_llm(provider, system_prompt, user_prompt)
-    parsed = parse_llm_response(llm_response.raw_text)
+
+    # §24 #2 — data-only short-circuit.  Skip the LLM call entirely for
+    # DataTable / UDataAsset subclasses; their narrative is templated.  The
+    # rest of the function (path-fallback for system tag, vault write) runs
+    # unchanged so the .md ends up shaped identically to an LLM-generated one.
+    if node.node_type in _DATA_ONLY_NODE_TYPES:
+        parsed = _build_data_only_parsed(node)
+        # Synthesize an LLMResponse so callers (batch worker, /scan/single)
+        # don't crash when reading `result["llm_response"].tokens_in`.  Zero
+        # tokens reflects reality — we never made the call.  (LLMResponse is
+        # already imported at module top; no local import needed.)
+        llm_response = LLMResponse(
+            raw_text=parsed["analysis_markdown"],
+            tokens_in=0,
+            tokens_out=0,
+            thinking_tokens=0,
+            model="(template)",
+            extra={"data_only_template": True, "node_type": node.node_type},
+        )
+        print(
+            f"[DATA_ONLY_TEMPLATE] {node.asset_path} ({node.node_type}) — "
+            f"skipped LLM call, used template (saved ~2k tokens)"
+        )
+    else:
+        llm_response = await call_llm(provider, system_prompt, user_prompt)
+        parsed = parse_llm_response(llm_response.raw_text)
+
+        # §24 #1 — log Anthropic prompt-cache telemetry.  In a healthy batch
+        # scan the first node pays cache_creation, every subsequent node hits
+        # cache_read.  If cache_read stays 0 across a batch, a silent
+        # invalidator is at work — see shared/prompt-caching.md audit table.
+        cache_read   = (llm_response.extra or {}).get("cache_read_input_tokens", 0) or 0
+        cache_create = (llm_response.extra or {}).get("cache_creation_input_tokens", 0) or 0
+        if cache_read or cache_create:
+            print(
+                f"[CACHE] {node.asset_path} "
+                f"in={llm_response.tokens_in} "
+                f"cache_read={cache_read} "
+                f"cache_create={cache_create} "
+                f"out={llm_response.tokens_out}"
+            )
 
     # Path-derived system fallback — when the LLM gives us no usable system
     # tag (weak instruction-following on Cropout demo: volcengine doubao
@@ -1054,6 +1262,28 @@ app.add_middleware(
 
 @app.get("/api/health")
 async def health_check():
+    # Lazy reconnect — lifespan only probes Redis once at startup, so if Redis
+    # was down at boot we'd be stuck in degraded mode forever even after Redis
+    # comes back.  When the cached flag is False, try a quick ping; on success
+    # we flip back to nominal.  When the flag is already True, we trust it
+    # (avoids burning a TCP roundtrip on every health poll, which the frontend
+    # makes on a short interval).
+    global redis_client
+    if not getattr(app.state, "redis_available", False):
+        try:
+            if redis_client is None:
+                redis_host = os.getenv("REDIS_HOST", "localhost")
+                redis_port = int(os.getenv("REDIS_PORT", 6379))
+                redis_client = redis.Redis(
+                    host=redis_host, port=redis_port, db=0,
+                    decode_responses=True, socket_connect_timeout=2,
+                )
+            await redis_client.ping()
+            app.state.redis_available = True
+            print("[ SYS_NOMINAL ] Redis reconnected via /api/health probe.")
+        except (RedisConnectionError, RedisTimeoutError):
+            # Stay degraded; next poll will retry.
+            pass
     return {
         "status": "SYS_NOMINAL",
         "redis_available": getattr(app.state, "redis_available", False),
@@ -1246,16 +1476,17 @@ def parse_l1_system_response(raw: str) -> Dict[str, Any]:
         "title": "",
         "intent": None,
         "system_risk_level": "nominal",
+        "hub": None,
         "external_dependencies": [],
         "analysis_markdown": raw,
         "parse_ok": False,
     }
-    md_match = _METADATA_RE.search(raw)
+    md_text = _extract_metadata_block(raw)
     body_match = _ANALYSIS_RE.search(raw)
 
-    if md_match:
+    if md_text:
         try:
-            md_obj = json.loads(md_match.group(1).strip())
+            md_obj = json.loads(md_text)
             out["system_id"] = str(md_obj.get("system_id") or "")
             out["title"] = str(md_obj.get("title") or "")
             out["intent"] = md_obj.get("intent")
@@ -1263,6 +1494,11 @@ def parse_l1_system_response(raw: str) -> Dict[str, Any]:
             if risk not in ("nominal", "warning", "critical"):
                 risk = "nominal"
             out["system_risk_level"] = risk
+            # Hub designation — `null` is a legitimate value (some systems
+            # are flat collections of helpers without a clear central node)
+            # so we accept `None` and let the writer skip the ★ marker.
+            hub_val = md_obj.get("hub")
+            out["hub"] = str(hub_val).strip() if isinstance(hub_val, str) and hub_val.strip() else None
             ext = md_obj.get("external_dependencies") or []
             if isinstance(ext, list):
                 out["external_dependencies"] = [e for e in ext if isinstance(e, dict)]
@@ -1319,7 +1555,14 @@ async def analyze_one_system_l1(
         user_prompt = json.dumps(payload, ensure_ascii=False)
 
     system_prompt = _apply_language(L1_SYSTEM_SCOPED_PROMPT, language)
-    llm_response = await call_llm(provider, system_prompt, user_prompt)
+    # L1 system synthesis runs significantly longer than L2 single-BP — the
+    # METADATA block alone can hit ~1 KB and the ANALYSIS body 2-3 KB, plus
+    # reasoning models (DeepSeek-R1, o1, QwQ) silently consume thousands of
+    # tokens on chain-of-thought before they emit the visible reply.  At
+    # 4096 max_tokens those models routinely return finish_reason="length"
+    # with `content` = "" — which surfaced as the empty-raw-output L1 batch
+    # failures.  8192 leaves headroom for both narrative + reasoning.
+    llm_response = await call_llm(provider, system_prompt, user_prompt, max_tokens=8192)
     parsed = parse_l1_system_response(llm_response.raw_text)
 
     write_path: Optional[str] = None
@@ -1331,6 +1574,7 @@ async def analyze_one_system_l1(
                 "title": parsed["title"] or system_id,
                 "intent": parsed["intent"],
                 "system_risk_level": parsed["system_risk_level"],
+                "hub": parsed.get("hub"),
                 "external_dependencies": parsed["external_dependencies"],
             },
             analysis_markdown=parsed["analysis_markdown"],
@@ -1386,7 +1630,26 @@ async def process_system_l1_task(
         )
 
         if not result["parsed"]["parse_ok"]:
-            err = "L1 system response did not contain a parseable METADATA block."
+            llm_resp = result.get("llm_response")
+            raw_snip = (getattr(llm_resp, "raw_text", "") or "")[:600]
+            snip_disp = raw_snip.replace("\r", " ").replace("\n", " ↵ ").strip()
+            extra = getattr(llm_resp, "extra", {}) or {}
+            tokens_in = getattr(llm_resp, "tokens_in", 0)
+            tokens_out = getattr(llm_resp, "tokens_out", 0)
+            diag_parts = [f"tokens={tokens_in}/{tokens_out}"]
+            fr = extra.get("finish_reason")
+            if fr:
+                diag_parts.append(f"finish_reason={fr}")
+            if extra.get("recovered_from"):
+                diag_parts.append(f"recovered_from={extra['recovered_from']}")
+            diag = " ".join(diag_parts)
+            err = (
+                f"L1 system response had no parseable METADATA block. [{diag}] "
+                f"LLM raw output (first 600 chars): {snip_disp or '<empty>'}"
+            )
+            msg_dump = extra.get("message_dump")
+            if not raw_snip and msg_dump:
+                err += f" | raw message dict: {msg_dump}"
             await redis_client.hset(f"task:{task_id}", "status", "FAILED")
             await redis_client.hset(f"task:{task_id}", "error", err)
             await redis_client.hset(f"task:{task_id}:nodes", system_id, "FAILED")
@@ -1479,7 +1742,38 @@ async def process_batch_l1_task(
                 timeout=180.0,
             )
             if not result["parsed"]["parse_ok"]:
-                raise RuntimeError("response missing parseable METADATA block")
+                # Surface the LLM's actual reply + provider diagnostics so the
+                # user can see WHY the parse failed.  When raw_text is empty
+                # but tokens_out > 0, the model DID produce output — it just
+                # landed in a non-standard field that our extraction didn't
+                # know about.  In that case we surface a dump of the raw
+                # message dict so the operator can identify the unknown
+                # field (e.g. `output.parts[0].text`) and we can add it to
+                # the fallback list with one line of code.
+                llm_resp = result.get("llm_response")
+                raw_snip = (getattr(llm_resp, "raw_text", "") or "")[:600]
+                snip_disp = raw_snip.replace("\r", " ").replace("\n", " ↵ ").strip()
+                extra = getattr(llm_resp, "extra", {}) or {}
+                tokens_in = getattr(llm_resp, "tokens_in", 0)
+                tokens_out = getattr(llm_resp, "tokens_out", 0)
+                diag_parts = [f"tokens={tokens_in}/{tokens_out}"]
+                fr = extra.get("finish_reason")
+                if fr:
+                    diag_parts.append(f"finish_reason={fr}")
+                if extra.get("recovered_from"):
+                    diag_parts.append(f"recovered_from={extra['recovered_from']}")
+                diag = " ".join(diag_parts)
+                err_msg = (
+                    f"L1 response had no parseable METADATA block. [{diag}] "
+                    f"LLM raw output (first 600 chars): {snip_disp or '<empty>'}"
+                )
+                # Append raw message dump only when raw_text was empty AND
+                # the provider gave us a dump — otherwise the dump is just
+                # the same content we already showed.
+                msg_dump = extra.get("message_dump")
+                if not raw_snip and msg_dump:
+                    err_msg += f" | raw message dict: {msg_dump}"
+                raise RuntimeError(err_msg)
             await redis_client.set(
                 f"result:{task_id}:{sid}",
                 result["parsed"]["analysis_markdown"],
@@ -1488,7 +1782,12 @@ async def process_batch_l1_task(
             await redis_client.hincrby(f"task:{task_id}", "completed_nodes", 1)
             completed += 1
         except Exception as e:
-            err_text = f"{type(e).__name__}: {e}"[:1000]
+            # 4500 char ceiling — large enough to fit the provider's full
+            # raw-body dump (up to 3500 chars) plus the diagnostic prefix
+            # plus the raw_text snip, so the operator can identify unknown
+            # proxy field shapes from the error pane alone without digging
+            # into uvicorn logs.
+            err_text = f"{type(e).__name__}: {e}"[:4500]
             print(f"[SYS_ERR] L1 system {sid} (batch task={task_id}) failed: {err_text}")
             try:
                 await redis_client.hset(f"task:{task_id}:nodes", sid, "FAILED")
@@ -1520,12 +1819,12 @@ def parse_l1_response(raw: str) -> Dict[str, Any]:
         "project_risk_level": "nominal",
         "analysis_markdown": raw, "parse_ok": False,
     }
-    md_match = _METADATA_RE.search(raw)
+    md_text = _extract_metadata_block(raw)
     body_match = _ANALYSIS_RE.search(raw)
 
-    if md_match:
+    if md_text:
         try:
-            md_obj = json.loads(md_match.group(1).strip())
+            md_obj = json.loads(md_text)
             systems_in = md_obj.get("systems") or []
             if isinstance(systems_in, list):
                 out["systems"] = [s for s in systems_in if isinstance(s, dict)]

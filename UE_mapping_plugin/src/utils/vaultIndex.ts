@@ -108,10 +108,18 @@ export function groupBySystem(summaries: NodeSummary[]): SystemBucket[] {
 
 export function nodeColor(nodeType: string): string {
   switch (nodeType) {
-    case 'Blueprint': return 'var(--node-blueprint)';
+    case 'Blueprint':
+    case 'WidgetBlueprint':
+    case 'AnimBlueprint':
+    case 'FunctionLibrary':
+    case 'MacroLibrary':
+      return 'var(--node-blueprint)';
     case 'CPP': return 'var(--node-cpp)';
     case 'Interface': return 'var(--node-interface)';
     case 'Component': return 'var(--node-component)';
+    case 'DataTable':
+    case 'DataAsset':
+      return 'var(--node-data)';
     default: return 'var(--text-muted)';
   }
 }

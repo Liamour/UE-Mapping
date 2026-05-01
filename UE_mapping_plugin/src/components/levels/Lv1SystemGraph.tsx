@@ -281,13 +281,19 @@ function buildGraph(
 }
 
 function edgeColor(edgeType: string): string {
+  // High-distinction palette — previous values used the same low-saturation
+  // sepia profile (#8a*) for every type, so dense graphs with mixed edge
+  // kinds looked monochromatic.  These hues line up with the node-type
+  // tokens (function_call ↔ blueprint amber, cast ↔ cpp teal, etc.) so a
+  // BP→BP function call stays in the warm-amber family while a cast hop
+  // immediately reads as the cool teal that marks C++ classes.
   switch (edgeType) {
-    case 'function_call': return '#8a7556';
-    case 'interface_call': return '#8a4a6c';
-    case 'cast': return '#4a6c8a';
-    case 'spawn': return '#6c8a4a';
-    case 'listens_to': return '#8a6c4a';
-    case 'inheritance': return '#7a4a8a';
-    default: return '#a39f8e';
+    case 'function_call':  return '#b8842f';   // amber
+    case 'interface_call': return '#a8458a';   // plum
+    case 'cast':           return '#2f6f88';   // teal
+    case 'spawn':          return '#5b8c3f';   // forest green
+    case 'listens_to':     return '#c75f3a';   // rust — distinct from amber
+    case 'inheritance':    return '#6e5092';   // deep violet — distinct from plum
+    default:               return '#888577';   // neutral gray for fallback
   }
 }
