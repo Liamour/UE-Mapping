@@ -13,7 +13,7 @@ import { create } from 'zustand';
 
 const STORAGE_KEY = 'aicartographer.llm.config';
 
-export type Provider = 'volcengine' | 'claude';
+export type Provider = 'volcengine' | 'claude' | 'openai_compat';
 export type ClaudeModel = 'opus' | 'sonnet' | 'haiku';
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'extra_high' | 'max';
 // Output language for LLM-generated narrative text (intent / ANALYSIS body /
@@ -32,12 +32,23 @@ export interface ClaudeConfig {
   effort: ClaudeEffort;
 }
 
+// Generic OpenAI-compatible provider — escape hatch for OpenAI itself,
+// OpenRouter, DeepSeek, Together, Groq, Fireworks, local LM Studio / Ollama,
+// or any server that speaks /v1/chat/completions.  All three fields are
+// required by the backend; ProviderConfigPayload is null until they're filled.
+export interface OpenAICompatConfig {
+  baseUrl: string;        // e.g. https://api.openai.com/v1, https://api.deepseek.com/v1
+  apiKey: string;
+  model: string;          // e.g. gpt-4o-mini, deepseek-chat, qwen2.5-coder:32b
+}
+
 export interface ProviderConfigPayload {
   provider: Provider;
   api_key: string;
   endpoint?: string;
   model?: string;
   effort?: string;
+  base_url?: string;      // openai_compat only
   concurrency?: number;
   language?: OutputLanguage;
 }
@@ -46,12 +57,14 @@ interface LLMState {
   provider: Provider;
   volcengine: VolcengineConfig;
   claude: ClaudeConfig;
+  openaiCompat: OpenAICompatConfig;
   concurrency: number;     // batch worker pool override sent to backend
   language: OutputLanguage; // narrative output language (en | zh)
 
   setProvider: (p: Provider) => void;
   setVolcengine: (patch: Partial<VolcengineConfig>) => void;
   setClaude: (patch: Partial<ClaudeConfig>) => void;
+  setOpenAICompat: (patch: Partial<OpenAICompatConfig>) => void;
   setConcurrency: (n: number) => void;
   setLanguage: (lang: OutputLanguage) => void;
   clearAll: () => void;
@@ -68,9 +81,12 @@ const DEFAULT_STATE = {
   provider: 'claude' as Provider,
   volcengine: { endpoint: '', apiKey: '' } as VolcengineConfig,
   claude: { apiKey: '', model: 'sonnet' as ClaudeModel, effort: 'medium' as ClaudeEffort } as ClaudeConfig,
+  openaiCompat: { baseUrl: '', apiKey: '', model: '' } as OpenAICompatConfig,
   concurrency: 20,
   language: 'en' as OutputLanguage,
 };
+
+const VALID_PROVIDERS: Provider[] = ['volcengine', 'claude', 'openai_compat'];
 
 function loadInitial(): typeof DEFAULT_STATE {
   try {
@@ -78,9 +94,10 @@ function loadInitial(): typeof DEFAULT_STATE {
     if (!raw) return { ...DEFAULT_STATE };
     const parsed = JSON.parse(raw);
     return {
-      provider: parsed.provider === 'volcengine' || parsed.provider === 'claude' ? parsed.provider : DEFAULT_STATE.provider,
+      provider: VALID_PROVIDERS.includes(parsed.provider) ? parsed.provider : DEFAULT_STATE.provider,
       volcengine: { ...DEFAULT_STATE.volcengine, ...(parsed.volcengine ?? {}) },
       claude: { ...DEFAULT_STATE.claude, ...(parsed.claude ?? {}) },
+      openaiCompat: { ...DEFAULT_STATE.openaiCompat, ...(parsed.openaiCompat ?? {}) },
       concurrency: typeof parsed.concurrency === 'number' ? parsed.concurrency : DEFAULT_STATE.concurrency,
       language: parsed.language === 'zh' || parsed.language === 'en' ? parsed.language : DEFAULT_STATE.language,
     };
@@ -95,6 +112,7 @@ function persist(state: typeof DEFAULT_STATE) {
       provider: state.provider,
       volcengine: state.volcengine,
       claude: state.claude,
+      openaiCompat: state.openaiCompat,
       concurrency: state.concurrency,
       language: state.language,
     }));
@@ -107,6 +125,7 @@ export const useLLMStore = create<LLMState>((set, get) => ({
   provider: initial.provider,
   volcengine: initial.volcengine,
   claude: initial.claude,
+  openaiCompat: initial.openaiCompat,
   concurrency: initial.concurrency,
   language: initial.language,
 
@@ -124,6 +143,11 @@ export const useLLMStore = create<LLMState>((set, get) => ({
     set({ claude: next });
     persist({ ...get(), claude: next });
   },
+  setOpenAICompat: (patch) => {
+    const next = { ...get().openaiCompat, ...patch };
+    set({ openaiCompat: next });
+    persist({ ...get(), openaiCompat: next });
+  },
   setConcurrency: (n) => {
     const clamped = Math.max(1, Math.min(64, Math.round(n) || 1));
     set({ concurrency: clamped });
@@ -138,6 +162,7 @@ export const useLLMStore = create<LLMState>((set, get) => ({
       provider: DEFAULT_STATE.provider,
       volcengine: { ...DEFAULT_STATE.volcengine },
       claude: { ...DEFAULT_STATE.claude },
+      openaiCompat: { ...DEFAULT_STATE.openaiCompat },
       concurrency: DEFAULT_STATE.concurrency,
       language: DEFAULT_STATE.language,
     });
@@ -152,6 +177,18 @@ export const useLLMStore = create<LLMState>((set, get) => ({
         provider: 'volcengine',
         api_key: s.volcengine.apiKey,
         endpoint: s.volcengine.endpoint,
+        concurrency: s.concurrency,
+        language: s.language,
+      };
+    }
+    if (s.provider === 'openai_compat') {
+      const o = s.openaiCompat;
+      if (!o.apiKey || !o.baseUrl || !o.model) return null;
+      return {
+        provider: 'openai_compat',
+        api_key: o.apiKey,
+        base_url: o.baseUrl,
+        model: o.model,
         concurrency: s.concurrency,
         language: s.language,
       };

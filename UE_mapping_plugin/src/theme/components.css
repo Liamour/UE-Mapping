@@ -692,9 +692,11 @@
   border: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
 }
-.tag-system { background: rgba(108, 138, 74, 0.12); color: var(--tag-system); border-color: rgba(108, 138, 74, 0.3); }
-.tag-layer  { background: rgba( 74, 108, 138, 0.12); color: var(--tag-layer);  border-color: rgba( 74, 108, 138, 0.3); }
-.tag-role   { background: rgba(138, 108, 74, 0.12); color: var(--tag-role);   border-color: rgba(138, 108, 74, 0.3); }
+/* Tag tint backgrounds — RGB triplets must match the --tag-* tokens above
+ * so the badge bg/border tint is the same hue as the text color. */
+.tag-system { background: rgba( 91, 140,  63, 0.13); color: var(--tag-system); border-color: rgba( 91, 140,  63, 0.32); }
+.tag-layer  { background: rgba( 47, 111, 136, 0.13); color: var(--tag-layer);  border-color: rgba( 47, 111, 136, 0.32); }
+.tag-role   { background: rgba(199,  95,  58, 0.13); color: var(--tag-role);   border-color: rgba(199,  95,  58, 0.32); }
 
 .bp-focus-body { display: flex; flex-direction: column; gap: 28px; }
 .bp-focus-narrative { font-family: var(--font-serif); font-size: 15px; line-height: 1.7; color: var(--text-primary); }

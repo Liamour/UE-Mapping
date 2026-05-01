@@ -371,6 +371,7 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
           </section>
         )}
 
+        <ClassDependenciesSection deps={fm.class_dependencies} titleToPath={titleToPath} navigate={navigate} />
         <EdgesSection title={t({ en: 'Outgoing', zh: '出向引用' })} edges={fm.edges} kind="out" titleToPath={titleToPath} navigate={navigate} />
         <BacklinksSection raw={file.raw} titleToPath={titleToPath} navigate={navigate} />
       </div>
@@ -421,6 +422,90 @@ const EdgesSection: React.FC<{
         </div>
         );
       })}
+    </section>
+  );
+};
+
+// Class dependencies — surfaces the bridge's reflection-walk hard/soft/interface
+// refs that vault_writer.py persists into `frontmatter.class_dependencies`
+// (§21.5 / Phase B §22.5 #4).  Especially load-bearing for DT / DataAsset
+// nodes which have no `edges` block (no UEdGraph → no outbound function calls)
+// — without this section the user sees a Lv2 page with no dependency info at
+// all even though the bridge already fingerprinted what the data table refs.
+const ClassDependenciesSection: React.FC<{
+  deps: unknown;
+  titleToPath: Record<string, string>;
+  navigate: (loc: any, t?: string) => void;
+}> = ({ deps, titleToPath, navigate }) => {
+  const t = useT();
+  if (!deps || typeof deps !== 'object') return null;
+  const d = deps as Record<string, unknown>;
+  const groups: Array<{ key: string; label: string; refs: string[] }> = [];
+  for (const [key, label] of [
+    ['hard_refs', t({ en: 'Hard refs', zh: '硬引用' })],
+    ['soft_refs', t({ en: 'Soft refs', zh: '软引用' })],
+    ['interfaces', t({ en: 'Interfaces', zh: '接口' })],
+  ] as const) {
+    const v = d[key];
+    if (Array.isArray(v) && v.length > 0) {
+      groups.push({ key, label, refs: v.map((x) => String(x)) });
+    }
+  }
+  if (groups.length === 0) return null;
+  return (
+    <section className="bp-focus-section">
+      <h3>
+        {t({ en: 'Class dependencies', zh: '类依赖' })}{' '}
+        <span className="muted" style={{ fontSize: 'var(--fs-xs)', fontWeight: 400 }}>
+          {t({
+            en: '— from AssetRegistry reflection walk',
+            zh: '— 来自 AssetRegistry 反射',
+          })}
+        </span>
+      </h3>
+      {groups.map((g) => (
+        <div key={g.key} className="edge-group">
+          <div className="edge-type">
+            {g.label} <span className="muted">({g.refs.length})</span>
+          </div>
+          <ul className="edge-list">
+            {g.refs.map((ref, i) => {
+              // Extract the trailing asset name from a /Game/... package path
+              // so we can attempt a vault-link resolution.  Falls back to the
+              // raw string for non-/Game/ refs (engine classes, plugin
+              // classes, native interfaces).
+              const segs = ref.split('/');
+              const last = segs[segs.length - 1] ?? ref;
+              // Some refs end as `Class'/Game/...'`, some as `BP_Foo.BP_Foo`,
+              // some as just `BP_Foo`.  Strip the duplicated suffix and any
+              // wrapping quotes.
+              const cleanName = last.split('.').pop()?.replace(/['"]/g, '') ?? last;
+              const targetPath = titleToPath[cleanName];
+              const prefix = ref.startsWith('/') && segs.length > 1
+                ? segs.slice(0, -1).join('/') + '/'
+                : '';
+              return (
+                <li key={i}>
+                  {targetPath ? (
+                    <button
+                      className="edge-target"
+                      onClick={() => navigate({ level: 'lv2', relativePath: targetPath }, cleanName)}
+                      title={ref}
+                    >
+                      {cleanName}
+                    </button>
+                  ) : (
+                    <span style={{ fontFamily: 'var(--font-mono, monospace)' }}>{cleanName}</span>
+                  )}
+                  {prefix && (
+                    <span className="muted" style={{ fontSize: 'var(--fs-xs)' }}> · {prefix}</span>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ))}
     </section>
   );
 };

@@ -24,14 +24,24 @@
   --accent-hover: #9a7553;
   --accent-soft: #f0e6d6;
 
-  --tag-system: #6c8a4a;
-  --tag-layer: #4a6c8a;
-  --tag-role: #8a6c4a;
+  /* Tag axis colors — system/layer/role badges in Lv2.  Refreshed alongside
+   * node-type swatches for the same distinction-on-cream reason. */
+  --tag-system: #5b8c3f;       /* matches node-component green */
+  --tag-layer:  #2f6f88;       /* matches node-cpp teal */
+  --tag-role:   #c75f3a;       /* rust — matches node-data; rare so warmth fits */
 
-  --node-blueprint: #6f6048;
-  --node-cpp: #4a6c8a;
-  --node-interface: #8a4a6c;
-  --node-component: #8a6c4a;
+  /* Node-type swatches.  The previous palette (~#8a*) had every hue at the
+   * same saturation/lightness so on the cream parchment bg the dots in the
+   * Lv0 sidebar were nearly indistinguishable — Blueprint vs Component
+   * differed only by a green/red component swap that the eye glosses over.
+   * Bumping chroma + spreading hues 60–90° apart restores at-a-glance
+   * distinction while staying warm enough not to clash with the Obsidian-
+   * style cream/sepia surfaces. */
+  --node-blueprint: #b8842f;   /* deep amber — most common, anchors the palette */
+  --node-cpp: #2f6f88;         /* strong teal — only cool hue, immediately stands out */
+  --node-interface: #a8458a;   /* vivid plum */
+  --node-component: #5b8c3f;   /* forest green */
+  --node-data: #c75f3a;        /* warm rust — DataTable / DataAsset (Phase B) */
 
   --risk-nominal: #6f8a6c;
   --risk-elevated: #c08a4a;

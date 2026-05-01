@@ -54,11 +54,13 @@ export const LLMProviderPanel: React.FC = () => {
   const provider = useLLMStore((s) => s.provider);
   const volcengine = useLLMStore((s) => s.volcengine);
   const claude = useLLMStore((s) => s.claude);
+  const openaiCompat = useLLMStore((s) => s.openaiCompat);
   const concurrency = useLLMStore((s) => s.concurrency);
   const language = useLLMStore((s) => s.language);
   const setProvider = useLLMStore((s) => s.setProvider);
   const setVolcengine = useLLMStore((s) => s.setVolcengine);
   const setClaude = useLLMStore((s) => s.setClaude);
+  const setOpenAICompat = useLLMStore((s) => s.setOpenAICompat);
   const setConcurrency = useLLMStore((s) => s.setConcurrency);
   const setLanguage = useLLMStore((s) => s.setLanguage);
   const clearAll = useLLMStore((s) => s.clearAll);
@@ -115,6 +117,7 @@ export const LLMProviderPanel: React.FC = () => {
       <div className="llm-provider-tabs">
         <ProviderTab id="volcengine" label={t({ en: 'Volcengine (Doubao)', zh: '火山引擎（豆包）' })} current={provider} onClick={setProvider} />
         <ProviderTab id="claude" label={t({ en: 'Anthropic Claude', zh: 'Anthropic Claude' })} current={provider} onClick={setProvider} />
+        <ProviderTab id="openai_compat" label={t({ en: 'OpenAI-compatible', zh: 'OpenAI 兼容' })} current={provider} onClick={setProvider} />
       </div>
 
       {provider === 'volcengine' && (
@@ -193,6 +196,61 @@ export const LLMProviderPanel: React.FC = () => {
                 </button>
               ))}
             </div>
+          </Field>
+        </div>
+      )}
+
+      {provider === 'openai_compat' && (
+        <div className="llm-provider-form">
+          <p className="muted llm-field-hint" style={{ marginTop: 0 }}>
+            {t({
+              en: 'Generic OpenAI protocol — works with OpenAI, OpenRouter, DeepSeek, Together, Groq, Fireworks, local LM Studio / Ollama / vLLM, etc. Anything that speaks /v1/chat/completions.',
+              zh: '泛用 OpenAI 协议 —— 适配 OpenAI、OpenRouter、DeepSeek、Together、Groq、Fireworks、本地 LM Studio / Ollama / vLLM 等。任何兼容 /v1/chat/completions 接口的服务都可以用。',
+            })}
+          </p>
+          <Field
+            label={t({ en: 'Base URL', zh: 'Base URL' })}
+            hint={t({
+              en: 'Full /v1 base URL. Examples: https://api.openai.com/v1, https://api.deepseek.com/v1, https://openrouter.ai/api/v1, http://localhost:11434/v1 (Ollama).',
+              zh: '完整的 /v1 base URL。例如：https://api.openai.com/v1、https://api.deepseek.com/v1、https://openrouter.ai/api/v1、http://localhost:11434/v1（Ollama）。',
+            })}
+          >
+            <input
+              className="settings-input"
+              type="text"
+              value={openaiCompat.baseUrl}
+              placeholder="https://api.openai.com/v1"
+              onChange={(e) => setOpenAICompat({ baseUrl: e.target.value.trim() })}
+              autoComplete="off"
+              spellCheck={false}
+            />
+          </Field>
+          <Field label={t({ en: 'API key', zh: 'API 密钥' })}>
+            <input
+              className="settings-input"
+              type="password"
+              value={openaiCompat.apiKey}
+              placeholder={t({ en: 'paste your API key', zh: '粘贴你的 API 密钥' })}
+              onChange={(e) => setOpenAICompat({ apiKey: e.target.value.trim() })}
+              autoComplete="off"
+            />
+          </Field>
+          <Field
+            label={t({ en: 'Model', zh: '模型' })}
+            hint={t({
+              en: 'Model id sent in the request. Examples: gpt-4o-mini, gpt-4o, deepseek-chat, deepseek-reasoner, meta-llama/llama-3.3-70b-instruct, qwen2.5-coder:32b.',
+              zh: '请求中使用的模型 id。例如：gpt-4o-mini、gpt-4o、deepseek-chat、deepseek-reasoner、meta-llama/llama-3.3-70b-instruct、qwen2.5-coder:32b。',
+            })}
+          >
+            <input
+              className="settings-input"
+              type="text"
+              value={openaiCompat.model}
+              placeholder="gpt-4o-mini"
+              onChange={(e) => setOpenAICompat({ model: e.target.value.trim() })}
+              autoComplete="off"
+              spellCheck={false}
+            />
           </Field>
         </div>
       )}

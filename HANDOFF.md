@@ -1,8 +1,8 @@
 # AICartographer 项目交接文档
 
-> 最后更新：2026-04-30（Phase A 收官 — A2 Reflection 业务集成 + B narrative prompt 重写 + A3 Lv4 CallTrace 一气合成）
+> 最后更新：2026-05-01（Phase B #2 — Anthropic prompt cache + data-only 模板化，单次 scan 成本预计 ~20w → ~5–8w token）
 > 这份文档把工程状态、架构、未完成任务一次性交给下一个 session。
-> **从下到上读**：§22 是最新（A2+B+A3 — §18.4 战略赌注兑现完毕，Phase A 收官），§21（Stale Asset Sync 全链路 + 6 项 bug fix），§20（A1 + A2 桥接层），§18（资深 UE5 dev 审视 + 10 条 roadmap + 战略判断），§17（P0/P1/P2 验证 + 进度表），§16（worktree → main），§15（4 项功能 + 重构），§13/§14（中文化 + 互动叙事），§1-§12 是历史交接。**新 session 必读 §22.4（已知限制） + §22.5（下次起点）。Phase A 已全部落地，下一阶段是 Phase B（叙事质量验证 + LLM 输出对齐）或新 roadmap。**
+> **从下到上读**：§24（Phase B #2 成本优化，本次），§23（Phase B #1 Reflection 扩 DataTable + UDataAsset），§22（Phase A 收官），§21（Stale Asset Sync），§20（A1 + A2 桥接层），§18（roadmap + 战略），§17（P0/P1/P2），§16（worktree → main），§13/§14/§15 早期，§1-§12 历史。**新 session 必读 §24.5（user 必做事项） + §24.7（下一阶段）。**
 
 ---
 
@@ -1754,4 +1754,75 @@ TBD feat(scan/Phase-B-1): extend Reflection to DataTable + UDataAsset subclasses
 2. **Phase B #3: Niagara**（独立 commit，需 `Build.cs` 改）
 3. **Phase B #4: Anti-fab guard**（§22.5 #1）—— 跑过 23.5 验证后如果叙事仍出现 inventory 外的名字，就上自动检测
 4. **Phase C: RAG 问答**（§18.6 阶段 C1）—— 真正解锁日常使用场景。bge-m3 + structure-aware chunks + reranker + tool-calling，前 3 块是 RAG 工程，第 4 块是产品架构（详见上一段聊天记录）
+
+---
+
+## 24. Session 2026-05-01 — Phase B #2: 成本优化（Anthropic prompt cache + 数据资产模板化）
+
+> 用户反馈每次 verification scan 烧 ~20w token。诊断后两条路：(1) ClaudeProvider 没开 Anthropic Prompt Caching，SYSTEM_PROMPT (~3500 tok × 90 个节点) 在白白重发；(2) DataAsset/DataTable 这类 data-only 资产的 LLM 输出永远是「Data-only asset — no execution flow」模板，烧 token 没意义。这一段把这两条优化一刀打掉。
+
+### 24.1 落地清单
+
+#### `backend/llm_providers.py::ClaudeProvider.analyze`
+
+- `system` 字段从 `str` 改为 `[{"type":"text","text":..., "cache_control":{"type":"ephemeral"}}]` —— 让 Anthropic 自动缓存 system prompt，5 分钟 TTL
+- `extra` 字段新增 `cache_creation_input_tokens` / `cache_read_input_tokens` —— 把缓存命中数据透传给上层，方便 audit
+- 顺手 bug fix：原来 `thinking_tokens` 错误地等于 `cache_creation_input_tokens`（语义错），改为 0（Anthropic SDK 不单独暴露 thinking tokens，已经包含在 `output_tokens` 里）
+
+#### `backend/main.py::analyze_one_node`
+
+- 新增 `_DATA_ONLY_NODE_TYPES = {"DataAsset", "DataTable"}` + 新 helper `_build_data_only_parsed(node)` 生成模板化 `parsed` dict —— 跳过 LLM 调用，直接拼 markdown
+- `analyze_one_node` 入口判断 `node.node_type` 是否 data-only，是则走模板路径，不是则正常 LLM 调用
+- 模板路径合成一个 `LLMResponse(tokens_in=0, tokens_out=0, model="(template)")`，下游（vault_writer / batch worker）零改动
+- LLM 路径后新增 `[CACHE]` 日志，把 `cache_read` / `cache_create` / `tokens_in` / `tokens_out` 都打出来
+- 模板路径打 `[DATA_ONLY_TEMPLATE]` 日志，便于统计省了多少次 LLM 调用
+
+### 24.2 预期节省（Cropout 项目，~90 个节点 / scan）
+
+| 优化项 | 改前 | 改后 | 节省 |
+| --- | --- | --- | --- |
+| SYSTEM_PROMPT 重发（~3500 tok × 90） | ~315k input | ~35k input（首次 1.25× 写入 + 89 次 0.10× 读取） | **~89%** |
+| Data-only 资产 LLM 调用（~14 次 × 2k tok） | ~28k mixed | 0 | **100%** |
+| 总体单次 full scan 估算 | ~20w token | **~5–8w token** | **~60–75%** |
+
+数字以「全量重扫」为基准；增量扫描（AST hash 命中）继续不调 LLM，本身已是 0 成本。
+
+### 24.3 验证方法
+
+跑完 framework scan + LLM analysis 后，看 uvicorn 控制台：
+
+- **`[CACHE]` 日志**：第一条节点应显示 `cache_create=~3500, cache_read=0`，从第二条开始应该是 `cache_create=0, cache_read=~3500`。如果第二条之后 `cache_read` 仍然是 0，说明有「静默失效因子」（system prompt 里嵌了 timestamp / UUID / 不稳定 JSON / 工具集变了等）—— 参考 `shared/prompt-caching.md` 的 silent-invalidator 审计表
+- **`[DATA_ONLY_TEMPLATE]` 日志**：DT_*/IA_*/IMC_* 应该全部走这条路，不会出现在 `[CACHE]` 日志里
+- **token 总账**：scan 结束后看 LLM provider 控制台 / 钱包，应该看到 input token 数显著下降
+
+### 24.4 已知限制 / 边界条件
+
+- **VolcengineProvider 没动**：Volcengine（Doubao）的 OpenAI-compatible 接口对 prompt caching 的支持取决于具体模型，需要单独验证。当前用户主要用 Volcengine 时，省的是 P1（data-only）那部分。如果用户切到 Claude，P0 + P1 双重生效
+- **Claude 模型最低缓存 prefix 阈值**：Sonnet 4.6 是 2048 tokens，Opus / Haiku 4.x 是 4096 tokens。SYSTEM_PROMPT ~3500 tok 在 Sonnet 上稳过线，在 Opus / Haiku 上**不稳**——如果用户切到这两类模型，可能看到 `cache_creation_input_tokens` 一直是 0（静默不缓存）。届时方案是把 tools / 其它静态前缀也纳入 cached prefix 凑过 4096
+- **5 分钟 TTL**：典型 batch scan 90 个节点 < 5 分钟跑完，TTL 够用；但单节点 scan（`/scan/single` endpoint）每次都是 cold cache，永远是 cache_create 不是 cache_read。这是设计行为，不是 bug
+- **Data-only 模板的 INTENT 不引用 title**：写死「Static row table read by callers via DataTable RowMap...」这种通用语，不会写「DT_Jobs 是村民职业表」之类的具体描述。后者需要 LLM 根据列结构推断。如果用户希望 data asset 有更具体叙事，未来可以加一条「小表（< 50 rows）允许 LLM dump rows」的 opt-in 路径
+
+### 24.5 user 必须做的事
+
+- **重启 uvicorn** —— `llm_providers.py` 和 `main.py` 都改了
+- **不必重 build C++ 插件** —— 全后端改动
+- **下次 scan 时观察控制台** —— 应该看到 `[CACHE]` + `[DATA_ONLY_TEMPLATE]` 日志开始刷
+- **如果用 Claude 模型**：直接生效。如果用 Volcengine：只有 P1（data-only 模板）生效，P0（prompt cache）需要 Volcengine 自己支持
+
+### 24.6 commit 待打
+
+```
+TBD perf(scan): cut LLM cost via Anthropic prompt cache + data-only template
+```
+
+单 commit 包：`llm_providers.py` (cache_control + cache hit telemetry) + `main.py` (data-only short-circuit + [CACHE] / [DATA_ONLY_TEMPLATE] 日志) + 本 §24。
+
+### 24.7 下一阶段建议
+
+按 §22.5 / §23.7 剩余优先级：
+
+1. **力度排序换一下** —— Phase B #2 已经把成本拍下来了，现在可以放心做 anti-fab guard 验证（§22.5 #1）：跑几次 full scan 看看叙事质量，有没有 inventory 外名字、有没有编造方法。如果有就上自动检测
+2. **Phase B #3: Lv4 inbound 反向调用链**（「谁调我」）—— 顺势工程，§23.7 推荐
+3. **Phase B #4: Niagara**（独立 commit，需 `Build.cs` 改）
+4. **Phase C: RAG 问答** —— 已有 §18.6 / 上次聊天的工程方案
 

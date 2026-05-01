@@ -1071,6 +1071,13 @@ def write_system_l1_narrative(
         risk = "nominal"
     scanned_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # Hub designation from L1 METADATA.  May be either an asset_path
+    # (`/Game/Combat/BP_Player1.BP_Player1`) or a bare title
+    # (`BP_Player1`) depending on how the model returned it — we tolerate
+    # both when matching against members below so the ★ lands regardless
+    # of the prompt's interpretation.
+    hub_raw = (metadata.get("hub") or "").strip() if metadata.get("hub") else ""
+
     fm = {
         "title": title,
         "node_type": "System",
@@ -1080,6 +1087,7 @@ def write_system_l1_narrative(
         "intent": metadata.get("intent"),
         "system_risk_level": risk,
         "risk_level": risk,                # for the existing system-risk pill renderer
+        "hub": hub_raw or None,
         "external_dependencies": metadata.get("external_dependencies") or [],
         "scan": {
             "scanned_at": scanned_at,
@@ -1094,6 +1102,12 @@ def write_system_l1_narrative(
     # parse failure on the LLM output still leaves the user with a usable
     # member list.  asset_index lets us route into the right vault subdir
     # (Interfaces/Widgets/etc) for non-BP members.
+    #
+    # Hub matching tolerates both forms the LLM might emit:
+    #   1) full asset_path  e.g. "/Game/Player/BP_Player1.BP_Player1"
+    #   2) bare title       e.g. "BP_Player1"
+    # The members caption already promises "Hub 节点用 ★ 标记" so missing
+    # the marker because of trivial format variance would look broken.
     asset_index = _build_member_index(members)
     member_lines: List[str] = []
     member_lines.append(s["members"])
@@ -1102,9 +1116,11 @@ def write_system_l1_narrative(
     for m in members:
         asset_path = m.get("asset_path") or ""
         member_title, link = _resolve_member_link(asset_path, asset_index)
+        is_hub = bool(hub_raw) and (asset_path == hub_raw or member_title == hub_raw)
+        marker = " ★" if is_hub else ""
         intent = (m.get("intent") or "").strip()
         suffix = f" — {intent}" if intent else ""
-        member_lines.append(f"- [{member_title}]({link}){suffix}")
+        member_lines.append(f"- [{member_title}]({link}){marker}{suffix}")
     member_lines.append("")
 
     body_lines: List[str] = []
