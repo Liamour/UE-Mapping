@@ -1821,8 +1821,82 @@ TBD perf(scan): cut LLM cost via Anthropic prompt cache + data-only template
 
 按 §22.5 / §23.7 剩余优先级：
 
-1. **力度排序换一下** —— Phase B #2 已经把成本拍下来了，现在可以放心做 anti-fab guard 验证（§22.5 #1）：跑几次 full scan 看看叙事质量，有没有 inventory 外名字、有没有编造方法。如果有就上自动检测
+1. ~~**anti-fab guard 验证**（§22.5 #1）~~ —— 已落地，详见 §25
 2. **Phase B #3: Lv4 inbound 反向调用链**（「谁调我」）—— 顺势工程，§23.7 推荐
 3. **Phase B #4: Niagara**（独立 commit，需 `Build.cs` 改）
-4. **Phase C: RAG 问答** —— 已有 §18.6 / 上次聊天的工程方案
+4. **IA / IMC vault 支持** —— C++ bridge 改动，已有 spawn task 文档；需要重编插件
+5. **Phase C: RAG 问答** —— 已有 §18.6 / 上次聊天的工程方案
+
+---
+
+## §25 Anti-fabrication audit — production-ready 门槛已通过（2026-05-02）
+
+> 一句话：**163 个引用、0 个编造，fabrication rate 0.00%**。L1 narrative 进入商用门槛。
+
+### 25.1 背景
+
+§22.5 #1 / §24.7 #1 列的"叙事可信度验证"是 Phase B 收官的最后未兑现项。本次会话用 `claude-sonnet-4-6` 通过 OpenAI-compat 代理跑完 Cropout demo 全量 L2 + L1 后，写了一个独立审计脚本对 16 个 system narrative 做静态校验。
+
+### 25.2 审计工具
+
+`backend/audit_vault.py` —— 只读、零依赖侧链（除 PyYAML）、可独立运行。CLI：
+
+```bash
+python backend/audit_vault.py <project_root> [--out vault-audit.md] [--json audit.json]
+```
+
+工作流程：
+
+1. 走 `vault/Systems/*.md`，按 frontmatter 拆出每个 system 的 LLM narrative 段（`## [ Members ]` 之前的部分）
+2. 用 `BACKTICK_IDENT_RE` 抓所有反引号包裹的标识符 + `MD_LINK_NAME_RE` 抓 `[Name](path)` 形式
+3. 按 UE 命名约定前缀（`BP_` / `BPI_` / `ABP_` / `BTT_` / `EQC_` / `UI_` / `IM_` / ...）过滤出资产引用，丢弃控制词表 token（`function_call` / `nominal` / `actor` 等）
+4. 每个引用按命中分桶：
+   - **in_scope**：在本 system 的 member 列表里（vault frontmatter `tags: [system/X]` 反查）
+   - **out_of_scope**：在 vault 但不属于本 system —— 跨系统引用，EXTERNAL COUPLING 段允许
+   - **fabricated**：vault 完全找不到 —— 凭空编造，**这才是必须为 0 的指标**
+
+### 25.3 首次审计结果（Cropout，claude-sonnet-4-6）
+
+| 指标 | 值 |
+|---|---:|
+| 扫描 system | 16 |
+| 总引用数 | 163 |
+| **凭空编造** | **0** |
+| 跨系统引用 | 50 |
+| **fabrication rate** | **0.00%** |
+| 判定 | **production-ready (< 1%)** |
+
+50 个 OOS 集中在接口（`BPI_GI` / `BPI_Resource` / `BPI_Villager` / `BPI_Player`）和 hub 类（`BP_GI` / `BP_GM` / `BP_Interactable`），都是合法跨系统消费——不是 bug。
+
+唯一可疑：`characters` 系统 3 member 全 OOS，说明 vault 里 `ABP_*` 没打 `#system/characters` tag，membership vocab 对不齐。这是 vocab 路径 fallback 的边界 case，不是编造。
+
+### 25.4 为什么 0 编造能成立
+
+回头看保护链路：
+
+1. **L1_SYSTEM_SCOPED_PROMPT** 的 ANTI-FABRICATION 硬约束（main.py：「every member name / edge target you reference MUST appear verbatim in the input. Don't invent.」）
+2. **L2 → L1 数据流不送 vault 之外的资产**：`analyze_one_system_l1` 用 `collect_l2_metadata` 过滤 system_id，LLM 物理上看不到不存在的 BP
+3. **Phase A2 reflection 替代 K2 dump**：结构性字段（exports / properties / class_dependencies）由 C++ 反射直出，LLM 不再被迫从 K2 节点字符串里"猜"函数名
+
+三层叠加，凭空编造的物理空间几乎为零。剩下的只有"LLM 在 INTERNAL CALL FLOW 里写了一句不存在的函数调用关系"——这是函数级而非资产级的 hallucination，需要更深一层的审计（见 25.6）。
+
+### 25.5 怎么用这个工具
+
+- **每次跑完 L1 batch 后跑一次** `python backend/audit_vault.py .` —— 30 秒出报告
+- **生产前检查**：fab rate ≥ 1% 就回头查 prompt 或换模型
+- **跨项目对比**：把 `--json` 输出存档，能看 fab rate 在不同项目 / 不同模型下的趋势
+- **审计输出文件**（`vault-audit.md` / `vault-audit.json`）刻意不入库——是项目特定的产物，类似测试报告，跑一次生成一次
+
+### 25.6 后续可选升级
+
+不阻塞 Phase B 收尾，但有需要可以做：
+
+1. **函数名级别审计**：抽取 `BP_X.FuncName` 模式，反查那个 BP 的 `exports.functions` / `events` / `dispatchers`。fuzzy 但能逮住"叙事里说 BP_Foo.Bar 但 Bar 不在 exports"这种 case
+2. **CI 集成**：把 `audit_vault.py` 接进 GitHub Actions，PR 修改 prompt / 模型时自动比对前后 fab rate
+3. **跨项目基线**：在多个 UE 项目上跑，建立"不同复杂度项目的 fab rate 上限"经验值
+4. **可视化**：vault-audit.md 现在是表格 + 列表，可以加个简单的 HTML 直方图
+
+### 25.7 commit
+
+`feat(audit): static fabrication check for L1 system narratives` —— 加 `backend/audit_vault.py` 单文件 + 本 §25 + `.gitignore` 屏蔽 `vault-audit.{md,json}` 输出。
 

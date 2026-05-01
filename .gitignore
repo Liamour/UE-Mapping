@@ -35,6 +35,12 @@ backend/__pycache__/
 backend/.venv/
 backend/dump_AST_*.json
 
+# audit_vault.py output — per-project fabrication report (regenerated each run)
+vault-audit.md
+vault-audit.json
+backend/redis.log.err
+backend/uvicorn.log.err
+
 # UE plugin package output (RunUAT BuildPlugin -Package=... default lands here)
 /AICartographer/
 
