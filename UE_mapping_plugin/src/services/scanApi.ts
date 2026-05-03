@@ -278,13 +278,19 @@ export async function postTestConnection(config: ProviderConfigPayload): Promise
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// Cross-BP call trace (A3 — HANDOFF §19.3 + §21.5).  Drives the Lv4 view.
-// Backend walks the vault, BFSes outbound edges from a root asset_path, and
-// returns nodes (with their BFS layer_distance) + edges suitable for a
-// concentric-ring force layout.  Bounded by max_depth + max_nodes so a hub
-// BP can't explode the request — the response carries a `truncated` flag
+// Cross-BP call trace (A3 — HANDOFF §19.3 + §21.5; Phase B #3 — §24.7 inbound).
+// Drives the Lv4 view.  Backend walks the vault and BFSes from a root
+// asset_path in either direction:
+//   - outbound ("我调谁") → follows rec.edges
+//   - inbound  ("谁调我") → follows reverse adjacency (callee → callers)
+// Returns nodes (with BFS layer_distance) + edges in the same shape regardless
+// of direction; emitted edges always keep their real direction
+// (source = caller, target = callee).  Bounded by max_depth + max_nodes so a
+// hub BP can't explode the request — the response carries a `truncated` flag
 // the UI surfaces honestly when limits cut the frontier short.
 // ─────────────────────────────────────────────────────────────────────────
+
+export type CallTraceDirection = 'outbound' | 'inbound';
 
 export type CallTraceEdgeType =
   | 'function_call'
@@ -318,6 +324,7 @@ export interface CallTraceEdge {
 
 export interface CallTraceResponse {
   root: string;
+  direction?: CallTraceDirection;
   max_depth: number;
   max_nodes: number;
   edge_types: CallTraceEdgeType[] | null;
@@ -332,6 +339,7 @@ export interface CallTraceQuery {
   maxDepth?: number;
   maxNodes?: number;
   edgeTypes?: CallTraceEdgeType[];   // omit / empty = all types
+  direction?: CallTraceDirection;    // omit = outbound (backend default)
 }
 
 export async function getCallTrace(q: CallTraceQuery): Promise<CallTraceResponse> {
@@ -344,6 +352,7 @@ export async function getCallTrace(q: CallTraceQuery): Promise<CallTraceResponse
   if (q.edgeTypes && q.edgeTypes.length > 0) {
     params.set('edge_types', q.edgeTypes.join(','));
   }
+  if (q.direction) params.set('direction', q.direction);
 
   let r: Response;
   try {

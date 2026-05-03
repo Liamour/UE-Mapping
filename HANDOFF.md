@@ -1,8 +1,8 @@
 # AICartographer 项目交接文档
 
-> 最后更新：2026-05-01（Phase B #2 — Anthropic prompt cache + data-only 模板化，单次 scan 成本预计 ~20w → ~5–8w token）
+> 最后更新：2026-05-03（Phase B #3 — Lv4 inbound CallTrace「谁调我」上线）
 > 这份文档把工程状态、架构、未完成任务一次性交给下一个 session。
-> **从下到上读**：§24（Phase B #2 成本优化，本次），§23（Phase B #1 Reflection 扩 DataTable + UDataAsset），§22（Phase A 收官），§21（Stale Asset Sync），§20（A1 + A2 桥接层），§18（roadmap + 战略），§17（P0/P1/P2），§16（worktree → main），§13/§14/§15 早期，§1-§12 历史。**新 session 必读 §24.5（user 必做事项） + §24.7（下一阶段）。**
+> **从下到上读**：§26（Phase B #3 inbound CallTrace，本次），§25（anti-fab 审计），§24（Phase B #2 成本优化），§23（Phase B #1 Reflection 扩 DataTable + UDataAsset），§22（Phase A 收官），§21（Stale Asset Sync），§20（A1 + A2 桥接层），§18（roadmap + 战略），§17（P0/P1/P2），§16（worktree → main），§13/§14/§15 早期，§1-§12 历史。**新 session 必读 §24.5（user 必做事项） + §24.7（下一阶段）。**
 
 ---
 
@@ -1822,7 +1822,7 @@ TBD perf(scan): cut LLM cost via Anthropic prompt cache + data-only template
 按 §22.5 / §23.7 剩余优先级：
 
 1. ~~**anti-fab guard 验证**（§22.5 #1）~~ —— 已落地，详见 §25
-2. **Phase B #3: Lv4 inbound 反向调用链**（「谁调我」）—— 顺势工程，§23.7 推荐
+2. ~~**Phase B #3: Lv4 inbound 反向调用链**（「谁调我」）~~ —— 已落地，详见 §26
 3. **Phase B #4: Niagara**（独立 commit，需 `Build.cs` 改）
 4. **IA / IMC vault 支持** —— C++ bridge 改动，已有 spawn task 文档；需要重编插件
 5. **Phase C: RAG 问答** —— 已有 §18.6 / 上次聊天的工程方案
@@ -1899,4 +1899,95 @@ python backend/audit_vault.py <project_root> [--out vault-audit.md] [--json audi
 ### 25.7 commit
 
 `feat(audit): static fabrication check for L1 system narratives` —— 加 `backend/audit_vault.py` 单文件 + 本 §25 + `.gitignore` 屏蔽 `vault-audit.{md,json}` 输出。
+
+---
+
+## §26 Phase B #3 — Lv4 inbound CallTrace（「谁调我」，2026-05-03）
+
+> 一句话：`/api/v1/calltrace` 加 `direction=inbound|outbound`，Lv4 头部加段控件切换；BFS 复用同一索引，反向邻接表在 `_build_calltrace_index` 一次遍历里建。
+
+### 26.1 触发动机
+
+A3 时（§22 commit `d5e5b87`）只做了 outbound（"我调谁"）。当时的判断是 MVP 收口故意先收一边；§22.6.4 明确写"A3 缺少'反向调用链'视图"。本次 §24.7 #2 兑现。
+
+对 hub BP（被广泛调用的 interface / GameInstance / GameMode）来说，"谁调我"才是更常用的视角——出向只能看到自己 call 的下游，入向才能回答"如果我改这个函数会炸到谁"。
+
+### 26.2 后端
+
+`backend/main.py`：
+
+- `_build_calltrace_index` 新增第三返回字段 `reverse_adjacency: Dict[str, List[{source, edge_type, refs}]]`。第二遍遍历同一组 `asset_to_record` 把 outbound 边按 target 反向入桶；同样过滤 `ALLOWED_EDGE_TYPES` + 跳掉 vault 外 target，跟正向 BFS 完全对称。
+- `/api/v1/calltrace` 新增 `direction: str = "outbound"` 查询参数（白名单 `{outbound, inbound}`，非法值返 400）。BFS 主循环按 direction 分支：
+  - outbound：旧逻辑（`rec["edges"]` → 邻居）
+  - inbound：从 `reverse_adjacency.get(cur, [])` 拿 callers
+- 输出边永远保持自然方向 `source = caller, target = callee`，由 `layer` 字段决定空间位置——对 inbound 来说 root 在中心，layer 1 是它的直接调用方。
+- 响应里加 `direction` 回显字段，便于前端 / 调试核对实际跑的方向。
+
+**为什么不分两个 endpoint**：单端点 + 参数是更小的 surface area。索引在两个方向之间是共享的（一次 vault walk 同时建正反邻接表），分端点会重复 walk 或加状态缓存，不划算。
+
+**没加缓存**：Cropout 76 个 BP 一次 walk + invert 在毫秒级完成。如果以后接了大型项目（数千 BP）感知到延迟，再按 §22.6 / handoff 之前的设计加 `_meta/calltrace_index.json` + mtime 失效。当前过早。
+
+### 26.3 前端
+
+`UE_mapping_plugin/src/services/scanApi.ts`：
+- 新增 `CallTraceDirection = 'outbound' | 'inbound'`
+- `CallTraceQuery.direction?` + `CallTraceResponse.direction?`
+- `getCallTrace` 把 `direction` 串到 URL（缺省走后端的 outbound）
+
+`UE_mapping_plugin/src/components/levels/Lv4CallTrace.tsx`：
+- 头部新增方向段控件，跟 depth picker 同样的「按钮组而不是 `<select>`」做法（CEF 嵌入态下 `<select>` 在某些 Windows 配置下会 `__debugbreak()`，§A3 已记录）
+- 标题文案随方向切：outbound = "调用链起点：X" / inbound = "被调用：X"；loading 文案同样切
+- `useEffect` 把 `direction` 加进 deps —— 切换方向 = 重拉。`enabledTypes` 仍然不在 deps 里（chip 过滤是客户端事），新增的 direction 会重拉。
+
+### 26.4 验证
+
+后端单元（`python -c` 直接调 `vault_calltrace`，不需启 uvicorn / Redis）：
+
+| 用例 | 结果 |
+|---|---|
+| inbound BPI_GI / depth=2 / nodes=50 | 28 nodes / 49 edges, 9 个 layer-1 callers，跟 reverse_adjacency 直查一致 |
+| outbound BP_Villager / depth=2 / nodes=50 | 4 nodes / 3 edges，跟改动前完全一致（无回归） |
+| direction=sideways | HTTP 400 `direction must be one of ['inbound', 'outbound']` |
+
+前端：
+- `npx tsc --noEmit` 干净
+- `npx vite build` 通过，564.99 kB / gzip 171.32 kB
+
+### 26.5 已知边界
+
+- **入向 hub 节点容易触发 truncate**：`BPI_GI` depth=2 已经接近 30 nodes，depth=3 在 hub 类上几乎必然触发 max_nodes=100。前端 `truncated` 红字会提示。如果用户抱怨，第一步先调高默认 max_nodes / 提供 picker，再考虑做 layer-aware budget（先填 layer 1 满，再往外扩）。
+- **不在 ALLOWED_EDGE_TYPES 里的 edge_type** 不进 reverse_adjacency。当前白名单 = `{function_call, interface_call, cast, spawn, listens_to, inheritance, delegate}`。若以后 vault 写入新 edge type（比如 Niagara `spawn_niagara`），记得同步白名单。
+- **跨 system / 跨方向的"完整图"还得自己脑补**：Lv4 一次只看一个 root + 一个方向。想要"X 的全调用环境"的话需要切两次方向看两张图。MVP 接受这个 UX 代价；如果后续有"双向同时"需求，再讨论是否合并视图（concentric 中心是 root，向内 = inbound，向外 = outbound 这种布局是可行的）。
+
+### 26.6 顺手修：Lv2 调用链按钮门控 + QuickSwitcher 搜索
+
+实测时连带处理两个相关问题：
+
+**A. Lv2 上 BPI / EQC / ABP / BPF 看不到调用链按钮**
+
+`Lv2BlueprintFocus.tsx:259` 的门控原本是 `Object.keys(fm.edges).length > 0`——只看出向。但 frontmatter 的 `edges:` 块只承载出向，所以纯被调类（接口、查询上下文、动画蓝图、函数库）永远不显示按钮，恰恰是 inbound 视图最有价值的对象。门控直接拆掉，按钮永远显示，Lv4 内部按方向各自处理空态。横扫验证 6 种 node_type × 双方向 0 异常。
+
+**B. QuickSwitcher 搜不到正文 / 大量 metadata**
+
+原实现只匹配 title / tags / intent 三字段，且只读 `fileCache`（没打开过的文件 tags/intent 是空）。「搜 widgets 只出 2 条」就是这个 bug 的后果（subdir = `Widgets` 没纳入比对）。
+
+修复：
+- 比对字段扩到 9 个（按权重）：title 10 / tags 6 / subdir 5 / node_type 5 / asset_path 4 / intent 4 / parent_class 3 / exports_* 3 / **body 2**
+- 新增 `useVaultStore.indexAllContent`：QuickSwitcher 打开时后台并发拉全部文件入 `fileCache`（concurrency=8，单文件失败不阻断），下次打开瞬时可用
+- 正文命中带片段预览（命中位置前 30 / 后 60 字符，去空白）
+- 底栏实时显示 `Indexing X/Y…` 直到索引完成
+
+跨字段兼容：`subdir` / `asset_path` 在 vault list manifest 里是免费数据，不需要等 cache。所以「搜 widgets / interface / Pawn」这类 metadata 查询索引未完成也立即出全。
+
+### 26.7 commit
+
+`feat: Lv4 inbound CallTrace + ungated button + QuickSwitcher full-text search` —— 单 commit 包：
+- `backend/main.py`（reverse_adjacency + direction param）
+- `scanApi.ts`（CallTraceDirection 类型）
+- `Lv4CallTrace.tsx`（方向段控件）
+- `Lv2BlueprintFocus.tsx`（按钮门控拆除）
+- `useVaultStore.ts`（indexAllContent）
+- `QuickSwitcher.tsx`（全字段 + 正文匹配 + 片段预览）
+- `HANDOFF.md`（本 §26 + §24.7 #2 划掉）
+- `Plugins/AICartographer/Resources/WebUI/index.html`（vite build 产物，沿用 §24 commit 惯例）
 

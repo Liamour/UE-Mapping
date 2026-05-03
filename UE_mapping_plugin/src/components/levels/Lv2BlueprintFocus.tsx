@@ -249,28 +249,29 @@ export const Lv2BlueprintFocus: React.FC<Props> = ({ relativePath }) => {
               </button>
             )}
             {/*
-              Lv4 entry — concentric BFS view of who-this-BP-calls (max
-              depth 3, max 100 nodes by default).  Hidden when there are
-              no outbound edges in frontmatter, since an empty trace
-              would just show a lonely root.  Reads from the existing
-              backend /api/v1/calltrace endpoint (HTTP only — no bridge
-              dependency).
+              Lv4 entry — concentric BFS view of cross-BP call relationships.
+              Always shown.  The frontmatter `edges:` block only carries
+              OUTBOUND edges, so gating on its presence used to hide the
+              button on assets that are pure callees — interfaces (BPI_*),
+              query contexts (EQC_*), anim blueprints (ABP_*), libraries
+              (BPF_*) — exactly the assets where inbound ("谁调我") is
+              most valuable.  Lv4 itself handles empty-state per direction.
+              Reads from the existing backend /api/v1/calltrace endpoint
+              (HTTP only — no bridge dependency).
             */}
-            {Object.keys((fm.edges as Record<string, unknown> | undefined) ?? {}).length > 0 && (
-              <button
-                className="btn-text"
-                onClick={() => navigate(
-                  { level: 'lv4', relativePath, systemId: activeSystemId },
-                  t({ en: 'Call trace', zh: '调用链' }),
-                )}
-                title={t({
-                  en: 'Open the cross-blueprint call trace from this BP (concentric BFS, depth ≤ 3)',
-                  zh: '从此蓝图打开跨蓝图调用链（同心环 BFS，深度 ≤ 3）',
-                })}
-              >
-                {t({ en: '⊙ Call trace', zh: '⊙ 调用链' })}
-              </button>
-            )}
+            <button
+              className="btn-text"
+              onClick={() => navigate(
+                { level: 'lv4', relativePath, systemId: activeSystemId },
+                t({ en: 'Call trace', zh: '调用链' }),
+              )}
+              title={t({
+                en: 'Open the cross-blueprint call trace (concentric BFS; toggle outbound / inbound)',
+                zh: '打开跨蓝图调用链（同心环 BFS；可切出向 / 入向）',
+              })}
+            >
+              {t({ en: '⊙ Call trace', zh: '⊙ 调用链' })}
+            </button>
           </div>
         </div>
         {openState.kind === 'error' && (

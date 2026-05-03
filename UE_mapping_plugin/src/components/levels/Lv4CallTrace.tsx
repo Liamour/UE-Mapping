@@ -38,6 +38,7 @@ import {
   getCallTrace,
   type CallTraceResponse,
   type CallTraceEdgeType,
+  type CallTraceDirection,
   BackendUnreachableError,
 } from '../../services/scanApi';
 import { tagNodeTypes, type TagNodeData } from '../graph/TagNode';
@@ -88,6 +89,7 @@ export const Lv4CallTrace: React.FC<Props> = ({ relativePath }) => {
 
   const [state, setState] = useState<LoadState>({ kind: 'idle' });
   const [maxDepth, setMaxDepth] = useState(DEFAULT_DEPTH);
+  const [direction, setDirection] = useState<CallTraceDirection>('outbound');
   const [enabledTypes, setEnabledTypes] = useState<Set<CallTraceEdgeType>>(
     new Set(EDGE_TYPE_ORDER),
   );
@@ -98,10 +100,10 @@ export const Lv4CallTrace: React.FC<Props> = ({ relativePath }) => {
 
   const assetPath = file?.frontmatter.asset_path as string | undefined;
 
-  // Fire whenever the root BP / depth / filter changes.  We do NOT include
-  // enabledTypes in the dependency because filtering is a UI-side concern
-  // — the backend already handed us the full graph; toggling chips just
-  // hides edges.  Re-fetching on every chip click would be wasteful.
+  // Fire whenever the root BP / depth / direction changes.  enabledTypes is
+  // intentionally NOT in the dep list — the backend already handed us the
+  // full graph for the current direction; toggling chips just hides edges
+  // client-side.  Re-fetching on every chip click would be wasteful.
   useEffect(() => {
     let cancelled = false;
     const run = async () => {
@@ -113,6 +115,7 @@ export const Lv4CallTrace: React.FC<Props> = ({ relativePath }) => {
           rootAssetPath: assetPath,
           maxDepth,
           maxNodes: DEFAULT_NODES,
+          direction,
         });
         if (cancelled) return;
         setState({ kind: 'ready', data });
@@ -129,7 +132,7 @@ export const Lv4CallTrace: React.FC<Props> = ({ relativePath }) => {
     };
     run();
     return () => { cancelled = true; };
-  }, [projectRoot, assetPath, maxDepth, t]);
+  }, [projectRoot, assetPath, maxDepth, direction, t]);
 
   // assetPath → relativePath index for click→navigate.  Built from the
   // sidebar's vault listing so a node click can navigate Lv2 even when
@@ -188,13 +191,19 @@ export const Lv4CallTrace: React.FC<Props> = ({ relativePath }) => {
     );
   }
   if (state.kind === 'idle' || state.kind === 'loading') {
+    const titleStr = (file.frontmatter.title ?? relativePath) as string;
     return (
       <div className="empty-state">
         <p className="muted">
-          {t({
-            en: `Tracing calls from ${file.frontmatter.title ?? relativePath}…`,
-            zh: `正在分析来自 ${file.frontmatter.title ?? relativePath} 的调用链…`,
-          })}
+          {direction === 'outbound'
+            ? t({
+                en: `Tracing calls from ${titleStr}…`,
+                zh: `正在分析来自 ${titleStr} 的调用链…`,
+              })
+            : t({
+                en: `Finding callers of ${titleStr}…`,
+                zh: `正在分析谁调用了 ${titleStr}…`,
+              })}
         </p>
       </div>
     );
@@ -233,7 +242,9 @@ export const Lv4CallTrace: React.FC<Props> = ({ relativePath }) => {
       <div className="function-flow-header">
         <div>
           <h2>
-            {t({ en: 'Call trace from ', zh: '调用链起点：' })}
+            {direction === 'outbound'
+              ? t({ en: 'Call trace from ', zh: '调用链起点：' })
+              : t({ en: 'Callers of ', zh: '被调用：' })}
             <code>{(file.frontmatter.title as string | undefined) ?? relativePath}</code>
           </h2>
           <span className="muted">
@@ -253,13 +264,47 @@ export const Lv4CallTrace: React.FC<Props> = ({ relativePath }) => {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           {/*
-            Button-group depth picker.  An HTML <select> would crash CEF
+            Button-group toggles.  An HTML <select> would crash CEF
             (UE5 WebBrowser) on some Windows configs because the Chromium
             popup widget can't resolve a parent HWND inside the embedded
             view — surfaces as a __debugbreak() / 0xC0000005 in
             UnrealEditor-WebBrowser.dll.  Custom toggle group avoids the
             popup entirely.
           */}
+          <span className="muted" style={{ fontSize: 'var(--fs-sm)' }}>
+            {t({ en: 'Direction', zh: '方向' })}:
+          </span>
+          <div className="depth-picker" role="radiogroup" aria-label="direction">
+            {(['outbound', 'inbound'] as const).map((d) => (
+              <button
+                key={d}
+                type="button"
+                role="radio"
+                aria-checked={d === direction}
+                onClick={() => setDirection(d)}
+                title={
+                  d === 'outbound'
+                    ? t({ en: 'Outbound — who I call', zh: '出向 — 我调谁' })
+                    : t({ en: 'Inbound — who calls me', zh: '入向 — 谁调我' })
+                }
+                style={{
+                  padding: '2px 10px',
+                  border: '1px solid #d8d4c8',
+                  background: d === direction ? '#3b82f6' : 'transparent',
+                  color: d === direction ? '#fff' : 'inherit',
+                  cursor: 'pointer',
+                  fontSize: 'var(--fs-sm)',
+                  borderRadius: 0,
+                  marginLeft: -1,
+                  fontWeight: d === direction ? 600 : 400,
+                }}
+              >
+                {d === 'outbound'
+                  ? t({ en: 'Outbound', zh: '出向' })
+                  : t({ en: 'Inbound', zh: '入向' })}
+              </button>
+            ))}
+          </div>
           <span className="muted" style={{ fontSize: 'var(--fs-sm)' }}>
             {t({ en: 'Depth', zh: '深度' })}:
           </span>

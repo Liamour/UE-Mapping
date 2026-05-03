@@ -2245,21 +2245,27 @@ ALLOWED_EDGE_TYPES = {
 
 def _build_calltrace_index(project_root: str) -> Dict[str, Any]:
     """Walks vault/*.md once, returns:
-      asset_to_record:  asset_path → {title, relative_path, node_type, intent,
-                                      risk_level, edges (nested), refs_in_per_type}
-      title_to_asset:   resolved-target-name → asset_path
+      asset_to_record:    asset_path → {title, relative_path, node_type, intent,
+                                        risk_level, edges (nested)}
+      title_to_asset:     resolved-target-name → asset_path
+      reverse_adjacency:  callee_asset → [{source: caller_asset, edge_type, refs}]
 
     Edges in frontmatter are stored under nested `edges:` blocks with
-    `target = <title>` (not asset_path).  We keep edges as-is; the BFS resolves
-    them via title_to_asset on the way out.  Self-edges and edges with no
-    matching target asset are simply skipped — they're cross-engine references
-    or stale entries from before a rename.
+    `target = <title>` (not asset_path).  We keep edges as-is for outbound BFS;
+    reverse_adjacency is the same data inverted (callee → callers) for inbound
+    BFS.  Self-edges and edges with no matching target asset are simply skipped
+    — they're cross-engine references or stale entries from before a rename.
     """
     root = vault_writer.vault_root(project_root)
     asset_to_record: Dict[str, Dict[str, Any]] = {}
     title_to_asset: Dict[str, str] = {}
+    reverse_adjacency: Dict[str, List[Dict[str, Any]]] = {}
     if not root.exists():
-        return {"asset_to_record": asset_to_record, "title_to_asset": title_to_asset}
+        return {
+            "asset_to_record": asset_to_record,
+            "title_to_asset": title_to_asset,
+            "reverse_adjacency": reverse_adjacency,
+        }
 
     for path in root.rglob("*.md"):
         if path.name.startswith("_"):
@@ -2288,7 +2294,43 @@ def _build_calltrace_index(project_root: str) -> Dict[str, Any]:
         asset_to_record[asset_path] = record
         title_to_asset[title] = asset_path
 
-    return {"asset_to_record": asset_to_record, "title_to_asset": title_to_asset}
+    # Second pass: invert edges into reverse_adjacency.  Done after asset/title
+    # indexing because edge `target` values are titles that need resolving to
+    # asset_paths via title_to_asset.  Skipped types and unresolvable targets
+    # mirror the outbound BFS's filtering so the two directions stay symmetric.
+    for caller_asset, rec in asset_to_record.items():
+        edges_block = rec.get("edges") or {}
+        if not isinstance(edges_block, dict):
+            continue
+        for edge_type, entries in edges_block.items():
+            if edge_type not in ALLOWED_EDGE_TYPES:
+                continue
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                target_title = entry.get("target")
+                if not isinstance(target_title, str) or not target_title:
+                    continue
+                target_asset = title_to_asset.get(target_title)
+                if not target_asset:
+                    continue
+                refs = entry.get("refs") or []
+                reverse_adjacency.setdefault(target_asset, []).append({
+                    "source": caller_asset,
+                    "edge_type": edge_type,
+                    "refs": [str(r) for r in refs] if isinstance(refs, list) else [],
+                })
+
+    return {
+        "asset_to_record": asset_to_record,
+        "title_to_asset": title_to_asset,
+        "reverse_adjacency": reverse_adjacency,
+    }
+
+
+ALLOWED_CALLTRACE_DIRECTIONS = {"outbound", "inbound"}
 
 
 @app.get("/api/v1/calltrace")
@@ -2298,11 +2340,19 @@ async def vault_calltrace(
     max_depth: int = DEFAULT_CALLTRACE_DEPTH,
     max_nodes: int = DEFAULT_CALLTRACE_NODES,
     edge_types: Optional[str] = None,
+    direction: str = "outbound",
 ):
     if not project_root:
         raise HTTPException(status_code=400, detail="project_root is required")
     if not root_asset_path:
         raise HTTPException(status_code=400, detail="root_asset_path is required")
+
+    direction = (direction or "outbound").lower().strip()
+    if direction not in ALLOWED_CALLTRACE_DIRECTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"direction must be one of {sorted(ALLOWED_CALLTRACE_DIRECTIONS)}",
+        )
 
     # Sanitise depth / nodes — accept any positive int but clamp to sane upper
     # bounds so a malformed query string can't make the BFS run away.
@@ -2321,6 +2371,7 @@ async def vault_calltrace(
     index = _build_calltrace_index(project_root)
     asset_to_record = index["asset_to_record"]
     title_to_asset = index["title_to_asset"]
+    reverse_adjacency = index["reverse_adjacency"]
 
     if root_asset_path not in asset_to_record:
         raise HTTPException(
@@ -2363,32 +2414,57 @@ async def vault_calltrace(
         if depth >= max_depth:
             continue
 
-        for edge_type, entries in (rec["edges"] or {}).items():
-            if not isinstance(entries, list):
-                continue
-            if requested_types and edge_type not in requested_types:
-                continue
-            for entry in entries:
-                if not isinstance(entry, dict):
+        # ── Outbound: follow rec["edges"] (cur → neighbours)
+        # ── Inbound:  follow reverse_adjacency[cur] (callers → cur)
+        # In both cases the emitted edge keeps its real direction
+        # (source = caller, target = callee).  Layer reflects BFS distance from
+        # root, so for inbound the root sits at the centre and its callers
+        # ring outward at layer 1, callers-of-callers at layer 2, etc.
+        if direction == "outbound":
+            for edge_type, entries in (rec["edges"] or {}).items():
+                if not isinstance(entries, list):
                     continue
-                target_title = entry.get("target")
-                if not isinstance(target_title, str) or not target_title:
+                if requested_types and edge_type not in requested_types:
                     continue
-                target_asset = title_to_asset.get(target_title)
-                if not target_asset:
-                    # Target not in vault (engine class, stale rename) — skip.
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    target_title = entry.get("target")
+                    if not isinstance(target_title, str) or not target_title:
+                        continue
+                    target_asset = title_to_asset.get(target_title)
+                    if not target_asset:
+                        # Target not in vault (engine class, stale rename) — skip.
+                        continue
+                    refs = entry.get("refs") or []
+                    edges_out.append({
+                        "source": cur,
+                        "target": target_asset,
+                        "edge_type": edge_type,
+                        "refs": [str(r) for r in refs] if isinstance(refs, list) else [],
+                    })
+                    if target_asset not in visited:
+                        visited[target_asset] = depth + 1
+                        if len(nodes_out) + len(queue) < max_nodes:
+                            queue.append((target_asset, depth + 1))
+                        else:
+                            truncated = True
+        else:  # inbound
+            for caller_entry in reverse_adjacency.get(cur, []):
+                edge_type = caller_entry["edge_type"]
+                if requested_types and edge_type not in requested_types:
                     continue
-                refs = entry.get("refs") or []
+                caller_asset = caller_entry["source"]
                 edges_out.append({
-                    "source": cur,
-                    "target": target_asset,
+                    "source": caller_asset,
+                    "target": cur,
                     "edge_type": edge_type,
-                    "refs": [str(r) for r in refs] if isinstance(refs, list) else [],
+                    "refs": list(caller_entry.get("refs") or []),
                 })
-                if target_asset not in visited:
-                    visited[target_asset] = depth + 1
+                if caller_asset not in visited:
+                    visited[caller_asset] = depth + 1
                     if len(nodes_out) + len(queue) < max_nodes:
-                        queue.append((target_asset, depth + 1))
+                        queue.append((caller_asset, depth + 1))
                     else:
                         truncated = True
 
@@ -2397,6 +2473,7 @@ async def vault_calltrace(
 
     return {
         "root": root_asset_path,
+        "direction": direction,
         "max_depth": max_depth,
         "max_nodes": max_nodes,
         "edge_types": sorted(requested_types) if requested_types else None,
