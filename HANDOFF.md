@@ -1,8 +1,9 @@
 # AICartographer 项目交接文档
 
-> 最后更新：2026-05-03（Phase B #3 — Lv4 inbound CallTrace「谁调我」上线）
+> 最后更新：2026-05-04（Phase C 准备：RAG 落地计划单独成文 [RAG_PLAN.md](RAG_PLAN.md)）
 > 这份文档把工程状态、架构、未完成任务一次性交给下一个 session。
-> **从下到上读**：§26（Phase B #3 inbound CallTrace，本次），§25（anti-fab 审计），§24（Phase B #2 成本优化），§23（Phase B #1 Reflection 扩 DataTable + UDataAsset），§22（Phase A 收官），§21（Stale Asset Sync），§20（A1 + A2 桥接层），§18（roadmap + 战略），§17（P0/P1/P2），§16（worktree → main），§13/§14/§15 早期，§1-§12 历史。**新 session 必读 §24.5（user 必做事项） + §24.7（下一阶段）。**
+> **Phase C（RAG 问答）的实施细节不在本文**，见 [RAG_PLAN.md](RAG_PLAN.md) —— 5 项关键决策已锁定。
+> **从下到上读**：§26（Phase B #3 inbound CallTrace），§25（anti-fab 审计），§24（Phase B #2 成本优化），§23（Phase B #1 Reflection 扩 DataTable + UDataAsset），§22（Phase A 收官），§21（Stale Asset Sync），§20（A1 + A2 桥接层），§18（roadmap + 战略），§17（P0/P1/P2），§16（worktree → main），§13/§14/§15 早期，§1-§12 历史。**新 session 必读 §24.5（user 必做事项） + §24.7（下一阶段）。**
 
 ---
 
@@ -1825,7 +1826,7 @@ TBD perf(scan): cut LLM cost via Anthropic prompt cache + data-only template
 2. ~~**Phase B #3: Lv4 inbound 反向调用链**（「谁调我」）~~ —— 已落地，详见 §26
 3. **Phase B #4: Niagara**（独立 commit，需 `Build.cs` 改）
 4. **IA / IMC vault 支持** —— C++ bridge 改动，已有 spawn task 文档；需要重编插件
-5. **Phase C: RAG 问答** —— 已有 §18.6 / 上次聊天的工程方案
+5. **Phase C: RAG 问答** —— **完整落地计划见 [RAG_PLAN.md](RAG_PLAN.md)**（2026-05-04 创建，5 项关键决策已锁定，等 user greenlight 进入 C0 脚手架）
 
 ---
 
